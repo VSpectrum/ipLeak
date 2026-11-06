@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IP Leak Check — HTTP, WebRTC &amp; BitTorrent</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="site-header">
+    <div class="container header-inner">
+      <div>
+        <h1>IP Leak Check</h1>
+        <p class="subtitle">Inspect HTTP, WebRTC, and BitTorrent connection IP addresses</p>
+      </div>
+      <span class="header-pill">Self-Hosted &bull; Zero Tracking</span>
+    </div>
+  </header>
+
+  <main class="container main-grid">
+    <!-- 1. HTTP Connection IP (loaded automatically on page visit) -->
+    <section class="card" aria-labelledby="http-ip-heading">
+      <div class="card-header">
+        <div>
+          <h2 id="http-ip-heading">Your HTTP IP Address</h2>
+          <p class="card-desc">The IP address observed by this server when loading the page.</p>
+        </div>
+        <div class="btn-group">
+          <button id="copy-http-ip-btn" class="btn btn-secondary" type="button" disabled>Copy IP</button>
+          <button id="refresh-http-ip-btn" class="btn btn-secondary" type="button">Refresh</button>
+        </div>
+      </div>
+
+      <div class="ip-hero">
+        <span id="http-ip-value" class="mono ip-primary">Loading&hellip;</span>
+        <div id="http-ip-badges" class="badge-row"></div>
+      </div>
+
+      <dl class="meta-grid" id="http-meta">
+        <div>
+          <dt>Detected Via</dt>
+          <dd id="http-detected-via" class="mono">&mdash;</dd>
+        </div>
+        <div>
+          <dt>User-Agent</dt>
+          <dd id="http-user-agent" class="mono muted-truncate">&mdash;</dd>
+        </div>
+      </dl>
+      <p id="http-local-note" class="hint-banner hidden">
+        You are accessing this service over a loopback address (<code class="mono">localhost</code> / <code class="mono">127.0.0.1</code>).
+        Access via your LAN or public server hostname to see external/VPN routing.
+      </p>
+    </section>
+
+    <!-- 2. WebRTC Leak Check (on-demand button) -->
+    <section class="card" aria-labelledby="webrtc-heading">
+      <div class="card-header">
+        <div>
+          <h2 id="webrtc-heading">WebRTC &amp; Browser Leak Check</h2>
+          <p class="card-desc">
+            Queries STUN servers directly from your browser via <code class="mono">RTCPeerConnection</code>
+            to check if WebRTC exposes real public or LAN IP addresses outside your proxy/VPN.
+          </p>
+        </div>
+        <button id="run-webrtc-btn" class="btn btn-primary" type="button">
+          Check WebRTC Leak
+        </button>
+      </div>
+
+      <div id="webrtc-idle" class="empty-state">
+        Click <strong>Check WebRTC Leak</strong> to run client-side ICE candidate gathering.
+      </div>
+
+      <div id="webrtc-results" class="hidden">
+        <div id="webrtc-verdict" class="verdict-banner"></div>
+        <div class="table-wrap">
+          <table class="data-table" id="webrtc-table">
+            <thead>
+              <tr>
+                <th>Address / Host</th>
+                <th>Scope</th>
+                <th>ICE Type</th>
+                <th>Protocol</th>
+                <th>vs. HTTP IP</th>
+              </tr>
+            </thead>
+            <tbody id="webrtc-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 3. BitTorrent IP Leak Check (magnet generator + tracker/peer listener) -->
+    <section class="card" aria-labelledby="torrent-heading">
+      <div class="card-header">
+        <div>
+          <h2 id="torrent-heading">BitTorrent IP Leak Check</h2>
+          <p class="card-desc">
+            Generates a unique magnet link pointing to this server&rsquo;s HTTP tracker, UDP tracker,
+            and TCP peer listener. Open it in your torrent client to see every IP it exposes.
+          </p>
+        </div>
+        <div class="btn-group">
+          <button id="generate-magnet-btn" class="btn btn-primary" type="button">
+            Generate Magnet Link
+          </button>
+          <button id="stop-torrent-btn" class="btn btn-secondary hidden" type="button">
+            Stop Listening
+          </button>
+        </div>
+      </div>
+
+      <div id="torrent-idle" class="empty-state">
+        Click <strong>Generate Magnet Link</strong> to create a unique test torrent session and start listening for connections.
+      </div>
+
+      <div id="torrent-panel" class="hidden">
+        <div class="magnet-box">
+          <div class="magnet-actions">
+            <a id="open-magnet-link" class="btn btn-accent" href="#">Open Magnet in Client</a>
+            <button id="copy-magnet-btn" class="btn btn-secondary" type="button">Copy Magnet URI</button>
+            <button id="refresh-torrent-btn" class="btn btn-secondary" type="button">Check Now</button>
+          </div>
+          <label class="field-label" for="magnet-uri-input">Generated Magnet URI</label>
+          <input id="magnet-uri-input" class="magnet-input mono" type="text" readonly />
+
+          <div class="session-meta">
+            <span>Info Hash: <code id="session-info-hash" class="mono"></code></span>
+            <span id="session-endpoints" class="endpoint-pills"></span>
+          </div>
+        </div>
+
+        <div class="listener-bar">
+          <span id="listener-dot" class="pulse-dot active"></span>
+          <span id="listener-status-text">Listening for HTTP tracker, UDP tracker, and TCP peer connections&hellip;</span>
+        </div>
+
+        <div id="torrent-verdict" class="verdict-banner hidden"></div>
+
+        <div id="torrent-empty-hits" class="empty-state subtle">
+          No BitTorrent connections received yet. Add the magnet link above to your torrent client (qBittorrent, Transmission, Deluge, etc.).
+        </div>
+
+        <div id="torrent-hits-wrap" class="table-wrap hidden">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Observed IP</th>
+                <th>Protocol Source</th>
+                <th>Client</th>
+                <th>Self-Reported IP</th>
+                <th>Hits</th>
+                <th>vs. Browser IP</th>
+              </tr>
+            </thead>
+            <tbody id="torrent-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="/static/js/app.js"></script>
+</body>
+</html>
+
