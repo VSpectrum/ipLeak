@@ -8,6 +8,7 @@ const SOURCE_LABELS = {
   http_tracker: "HTTP Tracker",
   udp_tracker: "UDP Tracker",
   bt_peer: "Peer Handshake (TCP)",
+  bt_peer_outbound: "Outbound Peer Probe (TCP)",
   http_scrape: "HTTP Scrape",
   udp_scrape: "UDP Scrape",
 };
@@ -18,9 +19,12 @@ export function createTorrentController({ getBrowserIp }) {
   const refreshBtn = document.getElementById("refresh-torrent-btn");
   const copyMagnetBtn = document.getElementById("copy-magnet-btn");
   const openMagnetLink = document.getElementById("open-magnet-link");
+  const downloadTorrentLink = document.getElementById("download-torrent-link");
   const magnetInput = document.getElementById("magnet-uri-input");
   const infoHashEl = document.getElementById("session-info-hash");
   const endpointsEl = document.getElementById("session-endpoints");
+  const peerProbeRowEl = document.getElementById("peer-probe-row");
+  const peerProbePillsEl = document.getElementById("peer-probe-pills");
 
   const idleBox = document.getElementById("torrent-idle");
   const panel = document.getElementById("torrent-panel");
@@ -108,8 +112,35 @@ export function createTorrentController({ getBrowserIp }) {
       `All observed BitTorrent connections (${torrentIp}) match your Browser HTTP IP (${browserIp}).`;
   }
 
+  function renderProbes(session) {
+    const probes = session.peer_probes || {};
+    const entries = Object.entries(probes);
+    if (entries.length === 0) {
+      peerProbeRowEl.classList.add("hidden");
+      peerProbePillsEl.replaceChildren();
+      return;
+    }
+    peerProbeRowEl.classList.remove("hidden");
+    peerProbePillsEl.replaceChildren();
+    for (const [endpoint, status] of entries) {
+      const badge = document.createElement("span");
+      const variant =
+        status === "open" ? "badge-warn" : status === "closed" ? "" : "badge-info";
+      badge.className = variant ? `badge ${variant}` : "badge";
+      const label =
+        status === "open"
+          ? `${endpoint} (Open / Reachable)`
+          : status === "closed"
+            ? `${endpoint} (Closed / NAT)`
+            : `${endpoint} (Probing…)`;
+      badge.textContent = label;
+      peerProbePillsEl.appendChild(badge);
+    }
+  }
+
   function renderSession(session) {
     renderVerdict(session);
+    renderProbes(session);
     const detections = session.detections || [];
 
     if (detections.length === 0) {
@@ -195,6 +226,7 @@ export function createTorrentController({ getBrowserIp }) {
 
       magnetInput.value = session.magnet_uri;
       openMagnetLink.href = session.magnet_uri;
+      downloadTorrentLink.href = session.torrent_url;
       infoHashEl.textContent = session.info_hash;
       renderEndpoints(session);
       renderSession(session);

@@ -42,6 +42,8 @@ def create_app(
                 host=cfg.bind_host,
                 port=cfg.peer_server_port,
                 strict_ports=cfg.strict_ports,
+                probe_enabled=cfg.peer_probe_enabled,
+                probe_timeout=cfg.peer_probe_timeout,
             )
             await peer_srv.start()
 
@@ -52,6 +54,7 @@ def create_app(
                 port=cfg.udp_tracker_port,
                 strict_ports=cfg.strict_ports,
                 peer_port_getter=lambda: peer_srv.bound_port if peer_srv else None,
+                peer_prober=peer_srv.schedule_outbound_probe if peer_srv else None,
                 public_ipv4=cfg.public_ipv4,
             )
             await udp_srv.start()

@@ -76,6 +76,24 @@ async def get_torrent_session(token: str, request: Request) -> JSONResponse:
     )
 
 
+@router.get("/api/torrent/sessions/{token}/torrent")
+async def download_torrent_file(token: str, request: Request) -> Response:
+    """Download a valid .torrent metainfo file matching the session's magnet info_hash."""
+    store: TorrentSessionStore = request.app.state.store
+    session = store.get_by_token(token)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Torrent check session not found or expired")
+
+    return Response(
+        content=session.torrent_bytes,
+        media_type="application/x-bittorrent",
+        headers={
+            "Content-Disposition": f'attachment; filename="{session.display_name}.torrent"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
 @router.get("/announce")
 @router.get("/announce/{token}")
 async def http_tracker_announce(request: Request, token: str | None = None) -> Response:
@@ -119,6 +137,9 @@ async def http_tracker_announce(request: Request, token: str | None = None) -> R
     )
     if session is None:
         return _bencoded_response({"failure reason": "Unknown or expired torrent session"})
+
+    if peer_server is not None and announced_port:
+        peer_server.schedule_outbound_probe(session.info_hash, client_ip, announced_port)
 
     peer_port = peer_server.bound_port if peer_server else None
     peer_ipv4 = (

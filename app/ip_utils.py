@@ -1,8 +1,10 @@
-"""Utilities for extracting, normalizing, and classifying IPv4/IPv6 addresses."""
+"""Utilities for extracting, normalizing, classifying, and binding IPv4/IPv6 addresses."""
 
 from __future__ import annotations
 
 import ipaddress
+import os
+import socket
 from dataclasses import dataclass
 
 from fastapi import Request
@@ -115,3 +117,43 @@ def resolve_peer_ipv4(host: str | None, configured_ipv4: str | None = None) -> s
             if isinstance(ip_obj, ipaddress.IPv4Address):
                 return normalized
     return None
+
+
+def bind_listener_socket(host: str, port: int, sock_kind: socket.SocketKind) -> socket.socket:
+    """Create and bind a non-blocking UDP or TCP socket with dual-stack support for '::'."""
+    target = host.strip() or "::"
+
+    if target == "::":
+        try:
+            sock = socket.socket(socket.AF_INET6, sock_kind)
+            try:
+                sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+                if sock_kind == socket.SOCK_STREAM and os.name != "nt":
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind(("::", port))
+                sock.setblocking(False)
+                return sock
+            except BaseException:
+                sock.close()
+                raise
+        except OSError as ipv6_exc:
+            # Fall back to IPv4 wildcard ONLY if IPv6 itself is disabled/unavailable
+            if ipv6_exc.errno not in {
+                getattr(socket, "EAFNOSUPPORT", -1),
+                getattr(socket, "EPROTONOSUPPORT", -1),
+                getattr(socket, "EADDRNOTAVAIL", -1),
+            }:
+                raise
+            target = "0.0.0.0"
+
+    family = socket.AF_INET6 if ":" in target else socket.AF_INET
+    sock = socket.socket(family, sock_kind)
+    try:
+        if sock_kind == socket.SOCK_STREAM and os.name != "nt":
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((target, port))
+        sock.setblocking(False)
+        return sock
+    except BaseException:
+        sock.close()
+        raise

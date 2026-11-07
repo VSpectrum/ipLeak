@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+
 from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import create_app
+from app.torrent.bencode import bdecode, bencode
 
 
 def test_serves_frontend_and_js_modules(client: TestClient) -> None:
@@ -87,6 +90,16 @@ def test_create_and_fetch_torrent_session(client: TestClient) -> None:
 
     missing_resp = client.get("/api/torrent/sessions/nonexistent")
     assert missing_resp.status_code == 404
+
+    # Verify downloadable .torrent file matches session info_hash
+    torrent_resp = client.get(session["torrent_url"])
+    assert torrent_resp.status_code == 200
+    assert torrent_resp.headers["content-type"] == "application/x-bittorrent"
+    assert session["display_name"] in torrent_resp.headers["content-disposition"]
+    metainfo = bdecode(torrent_resp.content)
+    assert hashlib.sha1(bencode(metainfo[b"info"])).hexdigest() == session["info_hash"]
+
+    assert client.get("/api/torrent/sessions/nonexistent/torrent").status_code == 404
 
 
 def test_localhost_request_normalizes_magnet_endpoints_to_ipv4_loopback() -> None:

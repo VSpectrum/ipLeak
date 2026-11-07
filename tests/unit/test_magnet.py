@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
 import urllib.parse
 
 import pytest
 
-from app.torrent.magnet import build_magnet_uri, decode_peer_id, format_host_port
+from app.torrent.bencode import bdecode, bencode
+from app.torrent.magnet import (
+    build_magnet_uri,
+    build_torrent_file,
+    decode_peer_id,
+    format_host_port,
+)
 
 
 def test_format_host_port() -> None:
@@ -57,4 +64,23 @@ def test_decode_peer_id_identifies_popular_clients() -> None:
     )
     assert decode_peer_id(None) == "Unknown BitTorrent Client"
     assert decode_peer_id(b"\x00\x01\x02") == "Unknown BitTorrent Client"
+
+
+def test_build_torrent_file_produces_matching_sha1_info_hash() -> None:
+    trackers = [
+        "http://127.0.0.1:8000/announce/tok1",
+        "udp://127.0.0.1:6969/announce",
+    ]
+    info_hash, raw_torrent = build_torrent_file(
+        display_name="ipleak-check-tok1",
+        trackers=trackers,
+    )
+    decoded = bdecode(raw_torrent)
+    assert decoded[b"announce"] == b"http://127.0.0.1:8000/announce/tok1"
+    assert decoded[b"announce-list"] == [
+        [b"http://127.0.0.1:8000/announce/tok1"],
+        [b"udp://127.0.0.1:6969/announce"],
+    ]
+    computed_hash = hashlib.sha1(bencode(decoded[b"info"])).hexdigest()
+    assert computed_hash == info_hash
 

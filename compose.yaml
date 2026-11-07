@@ -1,0 +1,21 @@
+services:
+  ipleak:
+    build: .
+    image: ipleak-service:latest
+    container_name: ipleak
+    ports:
+      - "8000:8000/tcp"
+      - "6969:6969/udp"
+      - "6889:6889/tcp"
+    environment:
+      IPLEAK_BIND_HOST: "::"
+      IPLEAK_UDP_TRACKER_PORT: "6969"
+      IPLEAK_PEER_SERVER_PORT: "6889"
+      IPLEAK_STRICT_PORTS: "true"
+      IPLEAK_PEER_PROBE_ENABLED: "${IPLEAK_PEER_PROBE_ENABLED:-true}"
+      IPLEAK_TRUST_PROXY_HEADERS: "${IPLEAK_TRUST_PROXY_HEADERS:-false}"
+      IPLEAK_PUBLIC_HOST: "${IPLEAK_PUBLIC_HOST:-}"
+      IPLEAK_PUBLIC_HTTP_BASE_URL: "${IPLEAK_PUBLIC_HTTP_BASE_URL:-}"
+      IPLEAK_PUBLIC_IPV4: "${IPLEAK_PUBLIC_IPV4:-}"
+    restart: unless-stopped
+

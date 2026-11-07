@@ -1,4 +1,4 @@
-"""Lightweight BEP 15 UDP BitTorrent tracker listener for IP leak detection."""
+"""Lightweight BEP 15 UDP BitTorrent tracker listener (dual-stack IPv4/IPv6)."""
 
 from __future__ import annotations
 
@@ -11,8 +11,9 @@ import socket
 import struct
 import time
 from collections.abc import Callable
+from typing import Any
 
-from app.ip_utils import normalize_ip, resolve_peer_ipv4
+from app.ip_utils import bind_listener_socket, normalize_ip, resolve_peer_ipv4
 from app.torrent.magnet import decode_peer_id
 from app.torrent.store import TorrentSessionStore
 
@@ -33,11 +34,13 @@ class _UDPTrackerProtocol(asyncio.DatagramProtocol):
         store: TorrentSessionStore,
         *,
         peer_port_getter: Callable[[], int | None] | None = None,
+        peer_prober: Callable[[str, str, int], Any] | None = None,
         public_ipv4: str | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._store = store
         self._peer_port_getter = peer_port_getter
+        self._peer_prober = peer_prober
         self._public_ipv4 = public_ipv4
         self._clock = clock
         self._secret = secrets.token_bytes(32)
@@ -46,12 +49,12 @@ class _UDPTrackerProtocol(asyncio.DatagramProtocol):
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         self._transport = transport  # type: ignore[assignment]
 
-    def datagram_received(self, data: bytes, addr: tuple[str, int]) -> None:
+    def datagram_received(self, data: bytes, addr: tuple[Any, ...]) -> None:
         if self._transport is None or len(data) < 16:
             return
 
-        client_ip = normalize_ip(addr[0]) or addr[0]
-        remote_port = addr[1]
+        client_ip = normalize_ip(str(addr[0])) or str(addr[0])
+        remote_port = int(addr[1])
 
         first_qword, action, tx_id = struct.unpack("!QII", data[:16])
 
@@ -79,7 +82,7 @@ class _UDPTrackerProtocol(asyncio.DatagramProtocol):
         tx_id: int,
         client_ip: str,
         remote_port: int,
-        addr: tuple[str, int],
+        addr: tuple[Any, ...],
     ) -> None:
         assert self._transport is not None
         if len(data) < 98:
@@ -94,7 +97,7 @@ class _UDPTrackerProtocol(asyncio.DatagramProtocol):
         if ip_uint32 != 0:
             reported_ips.append(socket.inet_ntoa(struct.pack("!I", ip_uint32)))
 
-        self._store.record_hit(
+        matched = self._store.record_hit(
             ip=client_ip,
             port=announced_port or remote_port,
             source="udp_tracker",
@@ -102,6 +105,8 @@ class _UDPTrackerProtocol(asyncio.DatagramProtocol):
             client=decode_peer_id(peer_id),
             reported_ips=reported_ips,
         )
+        if matched is not None and self._peer_prober and 1 <= announced_port <= 65535:
+            self._peer_prober(info_hash_hex, client_ip, announced_port)
 
         peers_payload = b""
         peer_port = self._peer_port_getter() if self._peer_port_getter else None
@@ -120,7 +125,7 @@ class _UDPTrackerProtocol(asyncio.DatagramProtocol):
         tx_id: int,
         client_ip: str,
         remote_port: int,
-        addr: tuple[str, int],
+        addr: tuple[Any, ...],
     ) -> None:
         assert self._transport is not None
         body = data[16:]
@@ -137,9 +142,9 @@ class _UDPTrackerProtocol(asyncio.DatagramProtocol):
         resp = struct.pack("!II", ACTION_SCRAPE, tx_id) + (struct.pack("!III", 1, 0, 0) * count)
         self._transport.sendto(resp, addr)
 
-    def _send_error(self, tx_id: int, message: str, addr: tuple[str, int]) -> None:
+    def _send_error(self, tx_id: int, message: str, addr: tuple[Any, ...]) -> None:
         if self._transport is not None:
-            payload = struct.pack("!II", ACTION_ERROR, tx_id) + message.encode("utf-8") + b"\x00"
+            payload = struct.pack("!II", ACTION_ERROR, tx_id) + message.encode() + b"\x00"
             self._transport.sendto(payload, addr)
 
     def _minute_bucket(self) -> int:
@@ -171,10 +176,11 @@ class UDPTrackerServer:
         self,
         store: TorrentSessionStore,
         *,
-        host: str = "0.0.0.0",
+        host: str = "::",
         port: int = 6969,
         strict_ports: bool = False,
         peer_port_getter: Callable[[], int | None] | None = None,
+        peer_prober: Callable[[str, str, int], Any] | None = None,
         public_ipv4: str | None = None,
     ) -> None:
         self.store = store
@@ -182,6 +188,7 @@ class UDPTrackerServer:
         self.configured_port = port
         self.strict_ports = strict_ports
         self._peer_port_getter = peer_port_getter
+        self._peer_prober = peer_prober
         self._public_ipv4 = public_ipv4
         self._transport: asyncio.DatagramTransport | None = None
         self.bound_port: int | None = None
@@ -191,13 +198,11 @@ class UDPTrackerServer:
         protocol_factory = lambda: _UDPTrackerProtocol(
             self.store,
             peer_port_getter=self._peer_port_getter,
+            peer_prober=self._peer_prober,
             public_ipv4=self._public_ipv4,
         )
         try:
-            transport, _ = await loop.create_datagram_endpoint(
-                protocol_factory,
-                local_addr=(self.host, self.configured_port),
-            )
+            sock = bind_listener_socket(self.host, self.configured_port, socket.SOCK_DGRAM)
         except OSError as exc:
             if self.strict_ports or self.configured_port == 0:
                 raise
@@ -206,15 +211,13 @@ class UDPTrackerServer:
                 self.configured_port,
                 exc,
             )
-            transport, _ = await loop.create_datagram_endpoint(
-                protocol_factory,
-                local_addr=(self.host, 0),
-            )
+            sock = bind_listener_socket(self.host, 0, socket.SOCK_DGRAM)
 
+        transport, _ = await loop.create_datagram_endpoint(protocol_factory, sock=sock)
         self._transport = transport  # type: ignore[assignment]
         sockname = transport.get_extra_info("sockname")
         self.bound_port = int(sockname[1])
-        logger.info("UDP BitTorrent tracker listening on %s:%d", self.host, self.bound_port)
+        logger.info("UDP BitTorrent tracker listening on [%s]:%d", self.host, self.bound_port)
         return self.bound_port
 
     async def stop(self) -> None:

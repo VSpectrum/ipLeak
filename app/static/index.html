@@ -47,8 +47,8 @@
         </div>
       </dl>
       <p id="http-local-note" class="hint-banner hidden">
-        You are accessing this service over a loopback address (<code class="mono">localhost</code> / <code class="mono">127.0.0.1</code>).
-        Access via your LAN or public server hostname to see external/VPN routing.
+        You are accessing this service over a local/private network (<code class="mono">localhost</code>, LAN, or Docker Desktop bridge).
+        Deploy on an external server (or configure <code class="mono">IPLEAK_TRUST_PROXY_HEADERS=true</code> behind a reverse proxy) to inspect external/VPN routing.
       </p>
     </section>
 
@@ -118,6 +118,7 @@
         <div class="magnet-box">
           <div class="magnet-actions">
             <a id="open-magnet-link" class="btn btn-accent" href="#">Open Magnet in Client</a>
+            <a id="download-torrent-link" class="btn btn-secondary" href="#" download>Download .torrent</a>
             <button id="copy-magnet-btn" class="btn btn-secondary" type="button">Copy Magnet URI</button>
             <button id="refresh-torrent-btn" class="btn btn-secondary" type="button">Check Now</button>
           </div>
@@ -127,6 +128,10 @@
           <div class="session-meta">
             <span>Info Hash: <code id="session-info-hash" class="mono"></code></span>
             <span id="session-endpoints" class="endpoint-pills"></span>
+          </div>
+          <div id="peer-probe-row" class="session-meta hidden">
+            <span>Outbound Port Probes:</span>
+            <span id="peer-probe-pills" class="endpoint-pills"></span>
           </div>
         </div>
 

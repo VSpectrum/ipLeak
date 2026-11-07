@@ -25,11 +25,11 @@ class _UDPTestClient(asyncio.DatagramProtocol):
         self.inbox.put_nowait(data)
 
 
-async def _udp_exchange(port: int, payload: bytes) -> bytes:
+async def _udp_exchange(port: int, payload: bytes, host: str = "127.0.0.1") -> bytes:
     loop = asyncio.get_running_loop()
     transport, proto = await loop.create_datagram_endpoint(
         _UDPTestClient,
-        remote_addr=("127.0.0.1", port),
+        remote_addr=(host, port),
     )
     try:
         transport.sendto(payload)
@@ -133,3 +133,34 @@ async def test_udp_tracker_falls_back_to_ephemeral_port_when_non_strict() -> Non
     finally:
         await fallback.stop()
         await primary.stop()
+
+
+async def test_udp_tracker_dual_stack_captures_ipv4_and_ipv6_on_same_port() -> None:
+    store = TorrentSessionStore(ttl_seconds=300)
+    session = store.create_session(creator_ip="127.0.0.1", trackers=[])
+    ih_bytes = bytes.fromhex(session.info_hash)
+
+    udp_server = UDPTrackerServer(store, host="::", port=0, strict_ports=True)
+    udp_port = await udp_server.start()
+    try:
+        for target_host in ("127.0.0.1", "::1"):
+            conn_resp = await _udp_exchange(
+                udp_port,
+                struct.pack("!QII", BEP15_PROTOCOL_ID, ACTION_CONNECT, 10),
+                host=target_host,
+            )
+            _, _, conn_id = struct.unpack("!IIQ", conn_resp)
+            ann_req = (
+                struct.pack("!QII", conn_id, ACTION_ANNOUNCE, 11)
+                + ih_bytes
+                + b"-qB4650-001122334455"
+                + struct.pack("!QQQ", 0, 0, 0)
+                + struct.pack("!IIIiH", 2, 0, 1, -1, 6881)
+            )
+            await _udp_exchange(udp_port, ann_req, host=target_host)
+
+        snap = session.to_dict()
+        assert set(snap["summary"]["unique_ips"]) == {"127.0.0.1", "::1"}
+        assert snap["summary"]["has_multi_ip_leak"] is True
+    finally:
+        await udp_server.stop()

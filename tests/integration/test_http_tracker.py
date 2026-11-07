@@ -23,6 +23,7 @@ def test_http_announce_records_binary_info_hash_and_returns_compact_peer() -> No
         public_ipv4="127.0.0.1",
         udp_tracker_port=0,
         peer_server_port=0,
+        peer_probe_enabled=False,
     )
     app = create_app(settings=settings)
 

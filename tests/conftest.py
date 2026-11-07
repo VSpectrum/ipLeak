@@ -21,6 +21,7 @@ def test_settings() -> Settings:
         udp_tracker_port=0,
         peer_server_enabled=True,
         peer_server_port=0,
+        peer_probe_enabled=False,
         strict_ports=True,
         trust_proxy_headers=False,
         session_ttl_seconds=900,

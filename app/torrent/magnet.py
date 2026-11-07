@@ -1,9 +1,14 @@
-"""Magnet URI builder (BEP 9) and BitTorrent peer_id client identification."""
+"""Magnet URI builder (BEP 9), .torrent builder (BEP 3/12), and peer_id client decoder."""
 
 from __future__ import annotations
 
+import hashlib
 import re
+import secrets
 import urllib.parse
+from typing import Any
+
+from app.torrent.bencode import bencode
 
 _AZUREUS_CLIENTS: dict[str, str] = {
     "qB": "qBittorrent",
@@ -68,6 +73,33 @@ def build_magnet_uri(
     return "magnet:?" + "&".join(parts)
 
 
+def build_torrent_file(
+    *,
+    display_name: str,
+    trackers: list[str],
+    nonce: str | None = None,
+) -> tuple[str, bytes]:
+    """Build a minimal valid BEP 3 / BEP 12 .torrent file and return ``(info_hash_hex, bytes)``."""
+    info_dict: dict[str, Any] = {
+        "length": 16,
+        "name": display_name,
+        "nonce": nonce or secrets.token_hex(8),
+        "piece length": 16384,
+        "pieces": b"\x00" * 20,
+    }
+    info_hash = hashlib.sha1(bencode(info_dict)).hexdigest()
+
+    metainfo: dict[str, Any] = {
+        "created by": "ipleak-service",
+        "info": info_dict,
+    }
+    if trackers:
+        metainfo["announce"] = trackers[0]
+        metainfo["announce-list"] = [[tr] for tr in trackers]
+
+    return info_hash, bencode(metainfo)
+
+
 def decode_peer_id(peer_id: bytes | None, user_agent: str | None = None) -> str:
     """Identify the BitTorrent client from HTTP User-Agent or 20-byte peer_id."""
     if user_agent:
@@ -115,4 +147,3 @@ def _format_azureus_version(raw: str) -> str:
     if digits:
         return ".".join(digits) + suffix
     return "".join(chars)
-

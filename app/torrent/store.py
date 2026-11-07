@@ -9,15 +9,18 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from app.ip_utils import classify_ip, normalize_ip
-from app.torrent.magnet import build_magnet_uri
+from app.torrent.magnet import build_magnet_uri, build_torrent_file
 
 DetectionSource = Literal[
     "http_tracker",
     "udp_tracker",
     "bt_peer",
+    "bt_peer_outbound",
     "http_scrape",
     "udp_scrape",
 ]
+
+ProbeStatus = Literal["pending", "open", "closed"]
 
 _UNSPECIFIED_IPS = {"0.0.0.0", "::"}
 
@@ -57,18 +60,20 @@ class Detection:
 
 @dataclass(slots=True)
 class TorrentSession:
-    """Represents one generated magnet link test session."""
+    """Represents one generated magnet/.torrent test session."""
 
     token: str
     info_hash: str
     display_name: str
     magnet_uri: str
+    torrent_bytes: bytes
     trackers: list[str]
     peers: list[str]
     creator_ip: str
     created_at: float
     expires_at: float
     detections: list[Detection] = field(default_factory=list)
+    peer_probes: dict[str, ProbeStatus] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         unique_ips: list[str] = []
@@ -92,12 +97,14 @@ class TorrentSession:
             "info_hash": self.info_hash,
             "display_name": self.display_name,
             "magnet_uri": self.magnet_uri,
+            "torrent_url": f"/api/torrent/sessions/{self.token}/torrent",
             "trackers": list(self.trackers),
             "peers": list(self.peers),
             "creator_ip": self.creator_ip,
             "created_at": self.created_at,
             "expires_at": self.expires_at,
             "detections": [d.to_dict(creator_ip=self.creator_ip) for d in self.detections],
+            "peer_probes": dict(self.peer_probes),
             "summary": {
                 "total_detections": len(self.detections),
                 "unique_ips": unique_ips,
@@ -147,7 +154,7 @@ class TorrentSessionStore:
         peers: list[str] | None = None,
         token: str | None = None,
     ) -> TorrentSession:
-        """Create and register a new magnet test session."""
+        """Create and register a new magnet/.torrent test session."""
         self.purge_expired()
 
         while len(self._by_token) >= self.max_sessions and self._by_token:
@@ -155,9 +162,12 @@ class TorrentSessionStore:
             self._remove_token(oldest_token)
 
         session_token = token or secrets.token_hex(8)
-        info_hash = secrets.token_hex(20)
         display_name = f"ipleak-check-{session_token[:8]}"
         peer_list = list(peers or [])
+        info_hash, torrent_bytes = build_torrent_file(
+            display_name=display_name,
+            trackers=trackers,
+        )
         magnet_uri = build_magnet_uri(
             info_hash,
             display_name=display_name,
@@ -172,6 +182,7 @@ class TorrentSessionStore:
             info_hash=info_hash,
             display_name=display_name,
             magnet_uri=magnet_uri,
+            torrent_bytes=torrent_bytes,
             trackers=list(trackers),
             peers=peer_list,
             creator_ip=normalized_creator,
@@ -190,6 +201,20 @@ class TorrentSessionStore:
         self.purge_expired()
         return self._by_info_hash.get(info_hash.strip().lower())
 
+    def claim_peer_probe(self, info_hash: str, endpoint: str) -> bool:
+        """Mark ``endpoint`` ('ip:port') as pending outbound probe if not yet probed."""
+        session = self.get_by_info_hash(info_hash)
+        if session is None or endpoint in session.peer_probes:
+            return False
+        session.peer_probes[endpoint] = "pending"
+        return True
+
+    def update_peer_probe(self, info_hash: str, endpoint: str, status: ProbeStatus) -> None:
+        """Update the result ('open' or 'closed') of an outbound peer connection probe."""
+        session = self.get_by_info_hash(info_hash)
+        if session is not None:
+            session.peer_probes[endpoint] = status
+
     def record_hit(
         self,
         *,
@@ -201,7 +226,7 @@ class TorrentSessionStore:
         client: str = "Unknown BitTorrent Client",
         reported_ips: list[str] | None = None,
     ) -> TorrentSession | None:
-        """Record an incoming tracker or peer connection against its matching session."""
+        """Record an incoming or outbound tracker/peer connection against its session."""
         self.purge_expired()
 
         session: TorrentSession | None = None

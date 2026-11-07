@@ -43,7 +43,7 @@ async function loadHttpIp() {
     httpDetectedViaEl.textContent = info.detected_via;
     httpUserAgentEl.textContent = info.user_agent || "—";
 
-    if (info.scope === "loopback") {
+    if (info.scope === "loopback" || info.scope === "private") {
       httpLocalNoteEl.classList.remove("hidden");
     } else {
       httpLocalNoteEl.classList.add("hidden");
