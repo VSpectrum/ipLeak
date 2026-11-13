@@ -196,6 +196,8 @@ async def test_udp_tracker_dual_stack_captures_ipv4_and_ipv6_on_same_port() -> N
 
         snap = session.to_dict()
         assert set(snap["summary"]["unique_ips"]) == {"127.0.0.1", "::1"}
-        assert snap["summary"]["has_multi_ip_leak"] is True
+        assert snap["summary"]["matches_browser_ip"] is True
+        assert snap["summary"]["other_family_ips"] == ["::1"]
+        assert snap["summary"]["has_multi_ip_leak"] is False
     finally:
         await udp_server.stop()

@@ -11,6 +11,7 @@ from app.ip_utils import (
     bind_listener_socket,
     classify_ip,
     describe_address,
+    ip_family,
     is_probeable_ip,
     normalize_ip,
     pack_compact_peer,
@@ -29,6 +30,10 @@ def test_normalize_ip_handles_ipv4_ipv6_brackets_zones_and_mapped() -> None:
     assert normalize_ip("") is None
     assert normalize_ip(None) is None
     assert normalize_ip("not-an-ip") is None
+    assert ip_family("203.0.113.50") == 4
+    assert ip_family("2001:db8::50") == 6
+    assert ip_family("::ffff:203.0.113.50") == 4
+    assert ip_family("not-an-ip") is None
 
 
 @pytest.mark.parametrize(

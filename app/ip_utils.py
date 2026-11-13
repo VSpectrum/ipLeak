@@ -55,6 +55,14 @@ def normalize_ip(raw: str | None) -> str | None:
     return str(ip_obj)
 
 
+def ip_family(raw: str | None) -> int | None:
+    """Return 4 or 6 for an IP literal, or None when ``raw`` is not an IP."""
+    normalized = normalize_ip(raw)
+    if normalized is None:
+        return None
+    return ipaddress.ip_address(normalized).version
+
+
 def classify_ip(raw: str) -> IPInfo:
     """Classify an IP string into version (4/6) and network scope."""
     normalized = normalize_ip(raw)

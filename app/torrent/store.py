@@ -8,7 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from app.ip_utils import classify_ip, normalize_ip
+from app.ip_utils import classify_ip, ip_family, normalize_ip
 from app.torrent.magnet import build_magnet_uri, build_torrent_file
 
 DetectionSource = Literal[
@@ -23,6 +23,31 @@ DetectionSource = Literal[
 ProbeStatus = Literal["pending", "open", "closed"]
 
 _UNSPECIFIED_IPS = {"0.0.0.0", "::"}
+
+
+def _group_by_family(addresses: list[str]) -> dict[int, list[str]]:
+    """Group IP literals by family. One v4 plus one v6 is normal dual-stack."""
+    grouped: dict[int, list[str]] = {}
+    for address in addresses:
+        family = ip_family(address)
+        if family is None:
+            continue
+        bucket = grouped.setdefault(family, [])
+        if address not in bucket:
+            bucket.append(address)
+    return grouped
+
+
+def _same_family_match(observed: str, creator_ip: str) -> bool | None:
+    """Return whether ``observed`` matches ``creator_ip`` inside one address family.
+
+    An IPv6 address observed beside an IPv4 browser connection is not a mismatch.
+    """
+    observed_family = ip_family(observed)
+    creator_family = ip_family(creator_ip)
+    if observed_family is None or creator_family is None or observed_family != creator_family:
+        return None
+    return observed == creator_ip
 
 
 @dataclass(slots=True)
@@ -51,7 +76,7 @@ class Detection:
             "source": self.source,
             "client": self.client,
             "reported_ips": list(self.reported_ips),
-            "matches_browser_ip": self.ip == creator_ip,
+            "matches_browser_ip": _same_family_match(self.ip, creator_ip),
             "first_seen": self.first_seen,
             "last_seen": self.last_seen,
             "hit_count": self.hit_count,
@@ -87,10 +112,15 @@ class TorrentSession:
                     reported_mismatch_ips.append(rep_ip)
 
         all_observed = list(dict.fromkeys([*unique_ips, *reported_mismatch_ips]))
-        if not all_observed:
+        by_family = _group_by_family(all_observed)
+        creator_family = ip_family(self.creator_ip)
+        same_family = by_family.get(creator_family, []) if creator_family else []
+        opposite = 6 if creator_family == 4 else 4
+        other_family = by_family.get(opposite, []) if creator_family else []
+        if not same_family:
             matches_browser_ip: bool | None = None
         else:
-            matches_browser_ip = all(ip == self.creator_ip for ip in all_observed)
+            matches_browser_ip = all(ip == self.creator_ip for ip in same_family)
 
         return {
             "token": self.token,
@@ -110,7 +140,8 @@ class TorrentSession:
                 "unique_ips": unique_ips,
                 "reported_mismatch_ips": reported_mismatch_ips,
                 "matches_browser_ip": matches_browser_ip,
-                "has_multi_ip_leak": len(all_observed) > 1,
+                "other_family_ips": other_family,
+                "has_multi_ip_leak": any(len(ips) > 1 for ips in by_family.values()),
             },
         }
 

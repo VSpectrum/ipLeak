@@ -3,7 +3,7 @@
  */
 
 import { createTorrentSession, fetchTorrentSession } from "./api.js";
-import { formatEndpoint } from "./webrtc.js";
+import { addressFamily, formatEndpoint, sameIp } from "./webrtc.js";
 
 const SOURCE_LABELS = {
   http_tracker: "HTTP Tracker",
@@ -153,23 +153,49 @@ export function createTorrentController({ getBrowserIp }) {
     const summary = session.summary || {};
     const browserIp = getBrowserIp() || session.creator_ip;
 
-    if (summary.has_multi_ip_leak || (summary.reported_mismatch_ips && summary.reported_mismatch_ips.length > 0)) {
+    const browserFamily = addressFamily(browserIp);
+    const observed = summary.unique_ips || [];
+    const reportedSameFamily = (summary.reported_mismatch_ips || []).filter(
+      (ip) => addressFamily(ip) === browserFamily
+    );
+    const sameFamily = observed.filter((ip) => addressFamily(ip) === browserFamily);
+    const otherFamily = (summary.other_family_ips || observed).filter(
+      (ip) => browserFamily && addressFamily(ip) && addressFamily(ip) !== browserFamily
+    );
+    const sameFamilyLeak = sameFamily.filter((ip) => !sameIp(ip, browserIp));
+
+    if (summary.has_multi_ip_leak || reportedSameFamily.length > 0) {
       verdictEl.classList.add("verdict-danger");
       verdictEl.textContent =
-        "Multiple IP addresses detected across BitTorrent protocols or announce parameters! " +
-        "Your proxy/VPN may be leaking UDP tracker traffic, peer TCP handshakes, or self-reported IP parameters.";
+        "Multiple IP addresses of the same family were detected across BitTorrent protocols or announce parameters. " +
+        "Your proxy or VPN may be leaking UDP tracker traffic, peer TCP handshakes, or a self-reported IP.";
       return;
     }
 
-    const torrentIp = summary.unique_ips && summary.unique_ips[0];
-    if (torrentIp && browserIp && torrentIp !== browserIp) {
+    if (sameFamilyLeak.length > 0) {
       verdictEl.classList.add("verdict-warn");
       verdictEl.textContent =
-        `Torrent IP (${torrentIp}) differs from Browser HTTP IP (${browserIp}). ` +
-        "Verify whether this is your intended torrent proxy/VPN IP or an unproxied leak.";
+        `Torrent IP (${sameFamilyLeak.join(", ")}) differs from Browser HTTP IP (${browserIp}). ` +
+        "Verify whether this is your intended torrent proxy or VPN IP, or an unproxied leak.";
       return;
     }
 
+    if (otherFamily.length > 0) {
+      const httpLabel = browserFamily === 6 ? "IPv6" : "IPv4";
+      const otherLabel = browserFamily === 6 ? "IPv4" : "IPv6";
+      const matchedText = sameFamily.length
+        ? `BitTorrent matches your HTTP ${httpLabel} (${browserIp}) and also saw ${otherLabel} `
+        : `BitTorrent saw ${otherLabel} `;
+      const tail = sameFamily.length
+        ? `${otherFamily.join(", ")}. That is the other address family on this network, not a leak.`
+        : `${otherFamily.join(", ")}. Your HTTP connection used ${httpLabel} ${browserIp}. ` +
+          "Those are different address families, not a leak.";
+      verdictEl.classList.add("verdict-ok");
+      verdictEl.textContent = `${matchedText}${tail}`;
+      return;
+    }
+
+    const torrentIp = sameFamily[0] || observed[0];
     verdictEl.classList.add("verdict-ok");
     verdictEl.textContent =
       `All observed BitTorrent connections (${torrentIp}) match your Browser HTTP IP (${browserIp}).`;
@@ -265,9 +291,16 @@ export function createTorrentController({ getBrowserIp }) {
       // 6. Comparison vs Browser IP
       const cmpTd = document.createElement("td");
       const cmpBadge = document.createElement("span");
-      const matches = browserIp ? det.ip === browserIp : det.matches_browser_ip;
-      cmpBadge.className = matches ? "badge badge-ok" : "badge badge-warn";
-      cmpBadge.textContent = matches ? "Same as Browser" : "Different IP";
+      const family = addressFamily(det.ip);
+      const browserFamily = addressFamily(browserIp);
+      if (browserIp && family && browserFamily && family !== browserFamily) {
+        cmpBadge.className = "badge badge-info";
+        cmpBadge.textContent = "Other address family";
+      } else {
+        const matches = browserIp ? sameIp(det.ip, browserIp) : det.matches_browser_ip === true;
+        cmpBadge.className = matches ? "badge badge-ok" : "badge badge-warn";
+        cmpBadge.textContent = matches ? "Same as Browser" : "Different IP";
+      }
       cmpTd.appendChild(cmpBadge);
       tr.appendChild(cmpTd);
 

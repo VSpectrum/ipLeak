@@ -145,13 +145,103 @@ function httpIsLocal(httpScope) {
   return httpScope === "loopback" || httpScope === "private" || httpScope === "link_local";
 }
 
+export function canonicalIp(ip) {
+  if (!ip) return "";
+  let value = String(ip).trim().toLowerCase();
+  if (value.startsWith("[") && value.endsWith("]")) value = value.slice(1, -1);
+  const zoneAt = value.indexOf("%");
+  if (zoneAt !== -1) value = value.slice(0, zoneAt);
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(value);
+  if (mapped) return mapped[1];
+  if (value.includes(":")) return canonicalIpv6(value);
+  return value;
+}
+
+function canonicalIpv6(address) {
+  let value = address;
+  const v4Tail = value.match(/^(.*:)(\d{1,3}(?:\.\d{1,3}){3})$/);
+  if (v4Tail) {
+    const octets = v4Tail[2].split(".").map((part) => Number(part));
+    if (octets.some((part) => part > 255)) return address;
+    const hi = ((octets[0] << 8) | octets[1]).toString(16);
+    const lo = ((octets[2] << 8) | octets[3]).toString(16);
+    value = `${v4Tail[1]}${hi}:${lo}`;
+  }
+  const halves = value.split("::");
+  if (halves.length > 2) return address;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const missing = halves.length === 2 ? 8 - head.length - tail.length : 0;
+  if (missing < 0) return address;
+  const groups = halves.length === 2 ? [...head, ...Array(missing).fill("0"), ...tail] : head;
+  if (groups.length !== 8) return address;
+  const nums = groups.map((group) => Number.parseInt(group || "0", 16));
+  if (nums.some((num) => Number.isNaN(num) || num > 0xffff)) return address;
+
+  let bestStart = -1;
+  let bestLen = 0;
+  let index = 0;
+  while (index < 8) {
+    if (nums[index] !== 0) {
+      index += 1;
+      continue;
+    }
+    let end = index;
+    while (end < 8 && nums[end] === 0) end += 1;
+    if (end - index > bestLen) {
+      bestStart = index;
+      bestLen = end - index;
+    }
+    index = end;
+  }
+  const hex = nums.map((num) => num.toString(16));
+  if (bestLen > 1) {
+    return `${hex.slice(0, bestStart).join(":")}::${hex.slice(bestStart + bestLen).join(":")}`;
+  }
+  return hex.join(":");
+}
+
+export function addressFamily(ip) {
+  const canonical = canonicalIp(ip);
+  if (!canonical) return null;
+  if (canonical.includes(":")) return 6;
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(canonical)) return 4;
+  return null;
+}
+
+export function sameIp(left, right) {
+  const a = canonicalIp(left);
+  const b = canonicalIp(right);
+  return Boolean(a) && a === b;
+}
+
+function familyLabel(family) {
+  return family === 6 ? "IPv6" : "IPv4";
+}
+
 function uniquePublicAddresses(candidates) {
   const ips = [];
   for (const cand of candidates) {
-    if (cand.isPublic && cand.address) ips.push(cand.address);
-    if (cand.relatedIsPublic && cand.relatedAddress) ips.push(cand.relatedAddress);
+    if (cand.isPublic && cand.address) ips.push(cand.normalizedIp || cand.address);
+    if (cand.relatedIsPublic && cand.relatedAddress) {
+      ips.push(cand.relatedNormalized || cand.relatedAddress);
+    }
   }
-  return [...new Set(ips)];
+  const unique = [];
+  for (const ip of ips) {
+    if (!unique.some((existing) => sameIp(existing, ip))) unique.push(ip);
+  }
+  return unique;
+}
+
+function groupPublicByFamily(ips) {
+  const groups = { 4: [], 6: [] };
+  for (const ip of ips) {
+    const family = addressFamily(ip);
+    if (!family) continue;
+    if (!groups[family].some((existing) => sameIp(existing, ip))) groups[family].push(ip);
+  }
+  return groups;
 }
 
 /**
@@ -190,13 +280,40 @@ export function buildWebRtcVerdict({ supported, candidates, httpIp, httpScope })
     };
   }
 
-  const leaked = publicIps.filter((ip) => ip !== httpIp);
+  const httpFamily = addressFamily(httpIp);
+  const grouped = groupPublicByFamily(publicIps);
+  const leaked = [];
+  for (const family of [4, 6]) {
+    const group = grouped[family];
+    if (family === httpFamily) {
+      leaked.push(...group.filter((ip) => !sameIp(ip, httpIp)));
+    } else if (group.length > 1) {
+      leaked.push(...group);
+    }
+  }
   if (leaked.length > 0) {
     return {
       tone: "danger",
       text:
-        `Potential WebRTC leak: STUN discovered public IP (${leaked.join(", ")}) ` +
-        `that differs from your HTTP IP (${httpIp}).`,
+        `Potential WebRTC leak: STUN discovered public ${familyLabel(addressFamily(leaked[0]))} ` +
+        `(${leaked.join(", ")}) that differs from your HTTP IP (${httpIp}).`,
+    };
+  }
+
+  const otherFamily = httpFamily === 4 ? 6 : 4;
+  const others = httpFamily ? grouped[otherFamily] : [];
+  if (others.length > 0) {
+    const httpLabel = familyLabel(httpFamily);
+    const otherLabel = familyLabel(otherFamily);
+    const matched = httpFamily ? grouped[httpFamily] : [];
+    const matchedText = matched.length
+      ? `Public ${httpLabel} from WebRTC matches your HTTP IP (${httpIp}). `
+      : `Your HTTP connection used ${httpLabel} ${httpIp}. `;
+    return {
+      tone: "ok",
+      text:
+        `${matchedText}WebRTC also exposed ${otherLabel} ${others.join(", ")}. ` +
+        "That is the other address family on this network, not a leak.",
     };
   }
 
@@ -216,7 +333,11 @@ export function comparisonBadge(candidate, httpIp, httpScope) {
   if (httpIsLocal(httpScope)) {
     return { text: "Not visible over HTTP", variant: "badge-warn" };
   }
-  if (httpIp && candidate.address === httpIp) {
+  const candidateIp = candidate.normalizedIp || candidate.address;
+  if (httpIp && addressFamily(candidateIp) && addressFamily(candidateIp) !== addressFamily(httpIp)) {
+    return { text: "Other address family", variant: "badge-info" };
+  }
+  if (httpIp && sameIp(candidateIp, httpIp)) {
     return { text: "Matches HTTP IP", variant: "badge-ok" };
   }
   return { text: "Differs from HTTP IP", variant: "badge-danger" };
@@ -226,10 +347,12 @@ function applyClassification(candidate, row, related) {
   if (row) {
     candidate.scope = row.scope;
     candidate.isPublic = Boolean(row.is_public);
+    if (row.ip) candidate.normalizedIp = row.ip;
   }
   if (related) {
     candidate.relatedScope = related.scope;
     candidate.relatedIsPublic = Boolean(related.is_public);
+    if (related.ip) candidate.relatedNormalized = related.ip;
   }
 }
 

@@ -74,6 +74,42 @@ def test_multi_ip_and_reported_param_leak_detection() -> None:
     assert snap["summary"]["has_multi_ip_leak"] is True
 
 
+def test_ipv4_and_ipv6_observations_are_not_a_multi_ip_leak() -> None:
+    store = TorrentSessionStore(ttl_seconds=300)
+    session = store.create_session(creator_ip="203.0.113.50", trackers=[])
+
+    store.record_hit(
+        ip="203.0.113.50",
+        source="http_tracker",
+        info_hash=session.info_hash,
+        reported_ips=["2001:db8::50"],
+    )
+    store.record_hit(
+        ip="2001:db8::50",
+        source="udp_tracker",
+        info_hash=session.info_hash,
+    )
+
+    snap = session.to_dict()
+    assert snap["summary"]["matches_browser_ip"] is True
+    assert snap["summary"]["other_family_ips"] == ["2001:db8::50"]
+    assert snap["summary"]["has_multi_ip_leak"] is False
+    assert snap["detections"][0]["matches_browser_ip"] is True
+    assert snap["detections"][1]["matches_browser_ip"] is None
+
+
+def test_two_public_addresses_in_one_family_are_still_a_leak() -> None:
+    store = TorrentSessionStore(ttl_seconds=300)
+    session = store.create_session(creator_ip="203.0.113.50", trackers=[])
+    store.record_hit(ip="203.0.113.50", source="http_tracker", info_hash=session.info_hash)
+    store.record_hit(ip="203.0.113.8", source="udp_tracker", info_hash=session.info_hash)
+    store.record_hit(ip="2001:db8::1", source="peer_wire", info_hash=session.info_hash)
+
+    snap = session.to_dict()
+    assert snap["summary"]["has_multi_ip_leak"] is True
+    assert snap["summary"]["matches_browser_ip"] is False
+
+
 def test_mismatched_token_and_info_hash_is_rejected() -> None:
     store = TorrentSessionStore(ttl_seconds=300)
     s1 = store.create_session(creator_ip="8.8.8.8", trackers=[], token="token_a")
