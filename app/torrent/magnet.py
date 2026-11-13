@@ -34,6 +34,10 @@ _AZUREUS_CLIENTS: dict[str, str] = {
 
 _MAINLINE_RE = re.compile(r"^M(\d+-\d+(?:-\d+)?)--")
 
+# 16-byte placeholder payload. ``pieces`` is the SHA-1 of this content so strict
+# clients accept the metainfo instead of rejecting an all-zero piece hash.
+TORRENT_PAYLOAD = b"ipleak-check!!!!"
+
 
 def format_host_port(host: str, port: int) -> str:
     """Format host and port, bracketing bare IPv6 literals."""
@@ -81,11 +85,11 @@ def build_torrent_file(
 ) -> tuple[str, bytes]:
     """Build a minimal valid BEP 3 / BEP 12 .torrent file and return ``(info_hash_hex, bytes)``."""
     info_dict: dict[str, Any] = {
-        "length": 16,
+        "length": len(TORRENT_PAYLOAD),
         "name": display_name,
         "nonce": nonce or secrets.token_hex(8),
         "piece length": 16384,
-        "pieces": b"\x00" * 20,
+        "pieces": hashlib.sha1(TORRENT_PAYLOAD).digest(),
     }
     info_hash = hashlib.sha1(bencode(info_dict)).hexdigest()
 

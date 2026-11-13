@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -19,6 +20,24 @@ from app.torrent.udp_tracker import UDPTrackerServer
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
+_SINGLE_PROCESS_ENV_VARS = ("WEB_CONCURRENCY", "UVICORN_WORKERS")
+
+
+def enforce_single_process() -> None:
+    """Refuse to start when the process supervisor asks for more than one worker.
+
+    Sessions live in memory, and the UDP tracker and TCP peer listener each bind
+    one port. A second worker would split those sessions and fight for the ports.
+    """
+    for name in _SINGLE_PROCESS_ENV_VARS:
+        raw = os.environ.get(name)
+        if raw is None or raw.strip() in {"", "1"}:
+            continue
+        raise RuntimeError(
+            f"{name}={raw.strip()} but this service must run as one process. "
+            "Start it with `python -m app` and leave worker counts at 1."
+        )
+
 
 def create_app(
     settings: Settings | None = None,
@@ -33,6 +52,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+        enforce_single_process()
         peer_srv: PeerWireServer | None = None
         udp_srv: UDPTrackerServer | None = None
 
@@ -44,6 +64,7 @@ def create_app(
                 strict_ports=cfg.strict_ports,
                 probe_enabled=cfg.peer_probe_enabled,
                 probe_timeout=cfg.peer_probe_timeout,
+                max_in_flight_probes=cfg.max_in_flight_probes,
             )
             await peer_srv.start()
 
@@ -56,6 +77,7 @@ def create_app(
                 peer_port_getter=lambda: peer_srv.bound_port if peer_srv else None,
                 peer_prober=peer_srv.schedule_outbound_probe if peer_srv else None,
                 public_ipv4=cfg.public_ipv4,
+                public_ipv6=cfg.public_ipv6,
             )
             await udp_srv.start()
 

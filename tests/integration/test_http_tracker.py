@@ -53,6 +53,7 @@ def test_http_announce_records_binary_info_hash_and_returns_compact_peer() -> No
         peer_port = struct.unpack("!H", tracker_dict[b"peers"][4:6])[0]
         assert peer_ip == "127.0.0.1"
         assert peer_port == app.state.peer_server.bound_port
+        assert tracker_dict[b"peers6"] == b""
 
         status = torrent_client.get(f"/api/torrent/sessions/{token}").json()
         assert len(status["detections"]) == 1
@@ -64,6 +65,84 @@ def test_http_announce_records_binary_info_hash_and_returns_compact_peer() -> No
         assert det["reported_ips"] == ["203.0.113.99"]
         assert status["summary"]["reported_mismatch_ips"] == ["203.0.113.99"]
         assert status["summary"]["has_multi_ip_leak"] is True
+
+
+def test_http_announce_returns_ipv4_and_ipv6_peers() -> None:
+    settings = Settings(
+        bind_host="127.0.0.1",
+        public_host="leak.example.com",
+        public_ipv4="203.0.113.10",
+        public_ipv6="2001:db8::10",
+        udp_tracker_enabled=False,
+        peer_server_port=0,
+        strict_ports=True,
+        peer_probe_enabled=False,
+    )
+    app = create_app(settings=settings)
+    with TestClient(app, client=("198.51.100.42", 51413)) as torrent_client:
+        session = torrent_client.post("/api/torrent/sessions").json()
+        peers = session["peers"]
+        assert any(peer.startswith("leak.example.com:") for peer in peers)
+        assert any(peer.startswith("203.0.113.10:") for peer in peers)
+        assert any(peer.startswith("[2001:db8::10]:") for peer in peers)
+
+        info_hash = _percent_encode_bytes(bytes.fromhex(session["info_hash"]))
+        announce = torrent_client.get(
+            f"/announce/{session['token']}?info_hash={info_hash}&port=6881&compact=1"
+        )
+        decoded = bdecode(announce.content)
+        assert socket.inet_ntoa(decoded[b"peers"][:4]) == "203.0.113.10"
+        assert socket.inet_ntop(socket.AF_INET6, decoded[b"peers6"][:16]) == "2001:db8::10"
+        assert len(decoded[b"peers6"]) == 18
+
+        listed = torrent_client.get(
+            f"/announce/{session['token']}?info_hash={session['info_hash']}&compact=0&port=6881"
+        )
+        peer_ips = {peer[b"ip"] for peer in bdecode(listed.content)[b"peers"]}
+        assert peer_ips == {b"203.0.113.10", b"2001:db8::10"}
+
+
+def test_localhost_dual_stack_magnet_includes_ipv6_peer() -> None:
+    settings = Settings(
+        bind_host="::",
+        udp_tracker_port=0,
+        peer_server_port=0,
+        strict_ports=True,
+        peer_probe_enabled=False,
+    )
+    app = create_app(settings=settings)
+    with TestClient(app, base_url="http://localhost:8000") as local_client:
+        session = local_client.post("/api/torrent/sessions").json()
+        assert any(peer.startswith("127.0.0.1:") for peer in session["peers"])
+        assert any(peer.startswith("[::1]:") for peer in session["peers"])
+
+
+def test_announce_probe_uses_socket_ip_not_forwarded_header() -> None:
+    settings = Settings(
+        bind_host="127.0.0.1",
+        udp_tracker_enabled=False,
+        peer_server_port=0,
+        strict_ports=True,
+        peer_probe_enabled=True,
+        peer_probe_timeout=0.2,
+        trust_proxy_headers=True,
+    )
+    app = create_app(settings=settings)
+    with TestClient(app, client=("203.0.113.10", 40000)) as torrent_client:
+        session = torrent_client.post(
+            "/api/torrent/sessions",
+            headers={"X-Forwarded-For": "203.0.113.10"},
+        ).json()
+        info_hash = _percent_encode_bytes(bytes.fromhex(session["info_hash"]))
+        announce = torrent_client.get(
+            f"/announce/{session['token']}?info_hash={info_hash}&port=51413",
+            headers={"X-Forwarded-For": "8.8.8.8"},
+        )
+        assert announce.status_code == 200
+        status = torrent_client.get(f"/api/torrent/sessions/{session['token']}").json()
+        assert status["detections"][0]["ip"] == "8.8.8.8"
+        assert all(not key.startswith("8.8.8.8") for key in status["peer_probes"])
+        assert status["peer_probes"] == {}
 
 
 def test_http_announce_supports_non_compact_and_failure_cases(client: TestClient) -> None:

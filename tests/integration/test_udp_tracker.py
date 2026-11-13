@@ -116,6 +116,41 @@ async def test_udp_tracker_connect_announce_scrape_and_error_handling() -> None:
         await udp_server.stop()
 
 
+async def test_udp_announce_returns_ipv6_peers_to_ipv6_clients() -> None:
+    store = TorrentSessionStore(ttl_seconds=300)
+    session = store.create_session(creator_ip="::1", trackers=[])
+    info_hash_bytes = bytes.fromhex(session.info_hash)
+    udp_server = UDPTrackerServer(
+        store,
+        host="::",
+        port=0,
+        strict_ports=True,
+        peer_port_getter=lambda: 6889,
+        public_ipv6="2001:db8::55",
+    )
+    udp_port = await udp_server.start()
+    try:
+        connect_resp = await _udp_exchange(
+            udp_port,
+            struct.pack("!QII", BEP15_PROTOCOL_ID, ACTION_CONNECT, 7),
+            host="::1",
+        )
+        _, _, conn_id = struct.unpack("!IIQ", connect_resp)
+        announce_req = (
+            struct.pack("!QII", conn_id, ACTION_ANNOUNCE, 8)
+            + info_hash_bytes
+            + b"-qB4650-001122334455"
+            + struct.pack("!QQQ", 0, 0, 0)
+            + struct.pack("!IIIiH", 2, 0, 1, -1, 6881)
+        )
+        announce_resp = await _udp_exchange(udp_port, announce_req, host="::1")
+        assert len(announce_resp) == 38
+        assert socket.inet_ntop(socket.AF_INET6, announce_resp[20:36]) == "2001:db8::55"
+        assert struct.unpack("!H", announce_resp[36:38])[0] == 6889
+    finally:
+        await udp_server.stop()
+
+
 async def test_udp_tracker_falls_back_to_ephemeral_port_when_non_strict() -> None:
     store = TorrentSessionStore(ttl_seconds=300)
     primary = UDPTrackerServer(store, host="127.0.0.1", port=0, strict_ports=True)

@@ -37,11 +37,14 @@ python -m venv .venv
 pip install -r requirements.txt
 # pip install -r requirements-dev.txt
 
-# 3. Start the FastAPI server (also starts UDP tracker on :6969 and TCP peer listener on :6889)
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+# 3. Start the service (one process: HTTP, UDP tracker on :6969, TCP peer listener on :6889)
+python -m app
+# Optional local reload: python -m app --reload
 ```
 
 Then open `http://127.0.0.1:8000` (or `http://<your-server-ip>:8000`).
+
+`python -m app` binds HTTP on `IPLEAK_BIND_HOST` (default `::`) with IPv4 and IPv6 on the same socket. Keep this as a single process. `WEB_CONCURRENCY` and `UVICORN_WORKERS` must stay at 1, because sessions are stored in memory and the UDP and TCP listeners each bind one port.
 
 ---
 
@@ -51,6 +54,7 @@ Then open `http://127.0.0.1:8000` (or `http://<your-server-ip>:8000`).
 app/
 ├── config.py              # IPLEAK_* environment settings dataclass
 ├── ip_utils.py            # Client IP extraction, IPv4-mapped IPv6 normalization, scope classification
+├── __main__.py            # Single-process dual-stack HTTP entrypoint (`python -m app`)
 ├── main.py                # FastAPI app factory & lifespan managing UDP/TCP BitTorrent listeners
 ├── routes/
 │   ├── ip.py              # GET /api/ip
@@ -79,20 +83,25 @@ All settings are optional and have sensible defaults in `app/config.py`:
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `IPLEAK_BIND_HOST` | `::` | Bind address for UDP tracker & TCP peer listeners (`::` enables dual-stack IPv4+IPv6) |
+| `IPLEAK_BIND_HOST` | `::` | Bind address for HTTP, the UDP tracker, and the TCP peer listener (`::` enables dual-stack IPv4+IPv6) |
+| `IPLEAK_HTTP_PORT` | `8000` | HTTP port used by `python -m app` |
 | `IPLEAK_PUBLIC_HOST` | *(from HTTP request)* | Explicit hostname/IP placed into generated magnet URIs |
 | `IPLEAK_PUBLIC_HTTP_BASE_URL` | *(from HTTP request)* | Explicit base URL for HTTP `/announce` in magnet URIs |
-| `IPLEAK_PUBLIC_IPV4` | *(auto when host is IPv4)* | Public IPv4 returned in compact 6-byte tracker `peers` responses |
+| `IPLEAK_PUBLIC_IPV4` | *(auto when host is IPv4)* | Public IPv4 returned in compact 6-byte tracker `peers` responses and magnet `x.pe` |
+| `IPLEAK_PUBLIC_IPV6` | *(auto `::1` for local dual-stack)* | Public IPv6 returned in compact `peers6` responses and magnet `x.pe` |
 | `IPLEAK_UDP_TRACKER_ENABLED` | `true` | Enable BEP 15 UDP tracker listener |
 | `IPLEAK_UDP_TRACKER_PORT` | `6969` | UDP tracker port (falls back to ephemeral port if busy unless strict) |
 | `IPLEAK_PEER_SERVER_ENABLED` | `true` | Enable BEP 3 TCP peer handshake listener |
 | `IPLEAK_PEER_SERVER_PORT` | `6889` | TCP peer listener port |
-| `IPLEAK_PEER_PROBE_ENABLED` | `true` | Actively probe client's announced TCP port with a BitTorrent handshake |
+| `IPLEAK_PEER_PROBE_ENABLED` | `true` | Actively probe the socket address of an announcing peer (forwarded headers are ignored) |
 | `IPLEAK_PEER_PROBE_TIMEOUT` | `2.0` | Timeout in seconds for outbound peer TCP probes |
+| `IPLEAK_MAX_IN_FLIGHT_PROBES` | `8` | Concurrent outbound peer probes allowed per session. Only global unicast addresses are probed |
 | `IPLEAK_STRICT_PORTS` | `false` | Fail startup instead of falling back if UDP/TCP port is occupied |
 | `IPLEAK_TRUST_PROXY_HEADERS` | `false` | Read `X-Forwarded-For` / `CF-Connecting-IP` / `X-Real-IP` when behind a reverse proxy |
 | `IPLEAK_SESSION_TTL_SECONDS` | `900` | Magnet session lifetime in seconds (15 minutes) |
 | `IPLEAK_MAX_SESSIONS` | `1000` | Maximum concurrent in-memory sessions |
+| `IPLEAK_SESSION_CREATE_LIMIT` | `10` | Magnet sessions one client IP may create during the window below |
+| `IPLEAK_SESSION_CREATE_WINDOW_SECONDS` | `300` | Rate-limit window for magnet session creation |
 
 ---
 

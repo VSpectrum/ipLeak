@@ -2,11 +2,17 @@
  * Main UI entrypoint wiring HTTP IP inspection, WebRTC leak check, and BitTorrent check.
  */
 
-import { fetchClientIp } from "./api.js";
-import { gatherWebRTCCandidates } from "./webrtc.js";
+import { classifyAddresses, fetchClientIp } from "./api.js";
 import { createTorrentController } from "./torrent.js";
+import {
+  buildWebRtcVerdict,
+  comparisonBadge,
+  formatEndpoint,
+  gatherWebRTCCandidates,
+} from "./webrtc.js";
 
 let currentBrowserIp = null;
+let currentHttpScope = null;
 
 // --- 1. HTTP Client IP Section ---
 
@@ -30,6 +36,7 @@ async function loadHttpIp() {
   try {
     const info = await fetchClientIp();
     currentBrowserIp = info.ip;
+    currentHttpScope = info.scope;
     httpIpValueEl.textContent = info.ip;
     copyHttpIpBtn.disabled = false;
 
@@ -43,12 +50,14 @@ async function loadHttpIp() {
     httpDetectedViaEl.textContent = info.detected_via;
     httpUserAgentEl.textContent = info.user_agent || "—";
 
-    if (info.scope === "loopback" || info.scope === "private") {
+    if (info.scope === "loopback" || info.scope === "private" || info.scope === "link_local") {
       httpLocalNoteEl.classList.remove("hidden");
     } else {
       httpLocalNoteEl.classList.add("hidden");
     }
   } catch (err) {
+    currentBrowserIp = null;
+    currentHttpScope = null;
     httpIpValueEl.textContent = "Unavailable";
     httpDetectedViaEl.textContent = err.message;
   } finally {
@@ -80,55 +89,35 @@ async function runWebrtcCheck() {
   runWebrtcBtn.textContent = "Checking STUN…";
 
   try {
-    const result = await gatherWebRTCCandidates({ timeoutMs: 4000 });
+    const result = await gatherWebRTCCandidates({
+      timeoutMs: 4000,
+      classify: classifyAddresses,
+    });
     webrtcIdleEl.classList.add("hidden");
     webrtcResultsEl.classList.remove("hidden");
-    webrtcVerdictEl.className = "verdict-banner";
     webrtcTbodyEl.replaceChildren();
 
-    if (!result.supported) {
-      webrtcVerdictEl.classList.add("verdict-ok");
-      webrtcVerdictEl.textContent = "WebRTC (RTCPeerConnection) is disabled in this browser — no WebRTC IP leak possible.";
-      return;
-    }
-
-    if (result.candidates.length === 0) {
-      webrtcVerdictEl.classList.add("verdict-ok");
-      webrtcVerdictEl.textContent = "No ICE candidates were exposed (WebRTC UDP/STUN may be blocked by your browser or firewall).";
-      return;
-    }
-
-    const publicMismatches = result.candidates.filter(
-      (c) => c.isPublic && currentBrowserIp && c.address !== currentBrowserIp
-    );
-    const anyPublic = result.candidates.some((c) => c.isPublic);
-
-    if (publicMismatches.length > 0) {
-      webrtcVerdictEl.classList.add("verdict-danger");
-      const leakedList = [...new Set(publicMismatches.map((c) => c.address))].join(", ");
-      webrtcVerdictEl.textContent =
-        `Potential WebRTC Leak: STUN discovered public IP (${leakedList}) that differs from your HTTP IP (${currentBrowserIp})!`;
-    } else if (anyPublic) {
-      webrtcVerdictEl.classList.add("verdict-ok");
-      webrtcVerdictEl.textContent =
-        "Public WebRTC STUN address matches your HTTP IP — no proxy/VPN bypass detected.";
-    } else {
-      webrtcVerdictEl.classList.add("verdict-ok");
-      webrtcVerdictEl.textContent =
-        "Only local/mDNS ICE candidates were gathered; no public IP was exposed via WebRTC.";
-    }
+    const verdict = buildWebRtcVerdict({
+      supported: result.supported,
+      candidates: result.candidates,
+      httpIp: currentBrowserIp,
+      httpScope: currentHttpScope,
+    });
+    webrtcVerdictEl.className = `verdict-banner verdict-${verdict.tone}`;
+    webrtcVerdictEl.textContent = verdict.text;
+    if (!result.supported || result.candidates.length === 0) return;
 
     for (const cand of result.candidates) {
       const tr = document.createElement("tr");
 
       const addrTd = document.createElement("td");
       addrTd.className = "mono";
-      addrTd.textContent = cand.port ? `${cand.address}:${cand.port}` : cand.address;
+      addrTd.textContent = formatEndpoint(cand.address, cand.port);
       tr.appendChild(addrTd);
 
       const scopeTd = document.createElement("td");
       scopeTd.appendChild(
-        makeBadge(cand.scope.toUpperCase(), cand.isPublic ? "badge-info" : "")
+        makeBadge((cand.scope || "unknown").toUpperCase(), cand.isPublic ? "badge-info" : "")
       );
       tr.appendChild(scopeTd);
 
@@ -142,18 +131,37 @@ async function runWebrtcCheck() {
       protoTd.textContent = cand.protocol.toUpperCase();
       tr.appendChild(protoTd);
 
-      const cmpTd = document.createElement("td");
-      if (!cand.isPublic) {
-        cmpTd.appendChild(makeBadge("Local / Non-Public"));
-      } else if (currentBrowserIp && cand.address === currentBrowserIp) {
-        cmpTd.appendChild(makeBadge("Matches HTTP IP", "badge-ok"));
+      const relatedTd = document.createElement("td");
+      relatedTd.className = "mono";
+      if (cand.relatedAddress) {
+        const label = document.createElement("span");
+        label.textContent = formatEndpoint(cand.relatedAddress, cand.relatedPort);
+        relatedTd.appendChild(label);
+        relatedTd.appendChild(document.createTextNode(" "));
+        relatedTd.appendChild(
+          makeBadge(
+            (cand.relatedScope || "unknown").toUpperCase(),
+            cand.relatedIsPublic ? "badge-info" : ""
+          )
+        );
       } else {
-        cmpTd.appendChild(makeBadge("Differs from HTTP IP", "badge-danger"));
+        relatedTd.textContent = "—";
       }
+      tr.appendChild(relatedTd);
+
+      const cmpTd = document.createElement("td");
+      const comparison = comparisonBadge(cand, currentBrowserIp, currentHttpScope);
+      cmpTd.appendChild(makeBadge(comparison.text, comparison.variant));
       tr.appendChild(cmpTd);
 
       webrtcTbodyEl.appendChild(tr);
     }
+  } catch (err) {
+    webrtcIdleEl.classList.add("hidden");
+    webrtcResultsEl.classList.remove("hidden");
+    webrtcVerdictEl.className = "verdict-banner verdict-warn";
+    webrtcVerdictEl.textContent = `WebRTC check failed: ${err.message}`;
+    webrtcTbodyEl.replaceChildren();
   } finally {
     runWebrtcBtn.disabled = false;
     runWebrtcBtn.textContent = "Re-check WebRTC Leak";

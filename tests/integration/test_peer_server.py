@@ -7,6 +7,7 @@ import struct
 import urllib.parse
 
 import httpx
+import pytest
 
 from app.config import Settings
 from app.main import create_app
@@ -80,7 +81,10 @@ async def test_peer_server_falls_back_to_ephemeral_port_when_non_strict() -> Non
         await primary.stop()
 
 
-async def test_peer_server_dual_stack_and_outbound_peer_probing() -> None:
+async def test_peer_server_dual_stack_and_outbound_peer_probing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.torrent.peer_server.is_probeable_ip", lambda _ip: True)
     store = TorrentSessionStore(ttl_seconds=300)
     session = store.create_session(creator_ip="127.0.0.1", trackers=[])
     ih_bytes = bytes.fromhex(session.info_hash)
@@ -169,6 +173,35 @@ async def test_peer_server_dual_stack_and_outbound_peer_probing() -> None:
     finally:
         mock_client_srv.close()
         await mock_client_srv.wait_closed()
+        await peer_server.stop()
+
+
+async def test_outbound_probe_skips_non_global_targets_and_caps_in_flight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = TorrentSessionStore(ttl_seconds=300)
+    session = store.create_session(creator_ip="8.8.8.8", trackers=[])
+    peer_server = PeerWireServer(
+        store,
+        host="127.0.0.1",
+        port=0,
+        strict_ports=True,
+        probe_enabled=True,
+        max_in_flight_probes=1,
+    )
+    await peer_server.start()
+    try:
+        for target in ("127.0.0.1", "10.1.2.3", "169.254.169.254", "100.64.0.1"):
+            assert peer_server.schedule_outbound_probe(session.info_hash, target, 6881) is None
+        assert session.peer_probes == {}
+
+        monkeypatch.setattr("app.torrent.peer_server.is_probeable_ip", lambda _ip: True)
+        first = peer_server.schedule_outbound_probe(session.info_hash, "127.0.0.1", 9)
+        second = peer_server.schedule_outbound_probe(session.info_hash, "127.0.0.1", 10)
+        assert first is not None
+        assert second is None
+        first.cancel()
+    finally:
         await peer_server.stop()
 
 

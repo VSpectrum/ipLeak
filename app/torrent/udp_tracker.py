@@ -13,7 +13,13 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from app.ip_utils import bind_listener_socket, normalize_ip, resolve_peer_ipv4
+from app.ip_utils import (
+    bind_listener_socket,
+    normalize_ip,
+    pack_compact_peer,
+    resolve_peer_ipv4,
+    resolve_peer_ipv6,
+)
 from app.torrent.magnet import decode_peer_id
 from app.torrent.store import TorrentSessionStore
 
@@ -36,12 +42,14 @@ class _UDPTrackerProtocol(asyncio.DatagramProtocol):
         peer_port_getter: Callable[[], int | None] | None = None,
         peer_prober: Callable[[str, str, int], Any] | None = None,
         public_ipv4: str | None = None,
+        public_ipv6: str | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._store = store
         self._peer_port_getter = peer_port_getter
         self._peer_prober = peer_prober
         self._public_ipv4 = public_ipv4
+        self._public_ipv6 = public_ipv6
         self._clock = clock
         self._secret = secrets.token_bytes(32)
         self._transport: asyncio.DatagramTransport | None = None
@@ -111,10 +119,7 @@ class _UDPTrackerProtocol(asyncio.DatagramProtocol):
         peers_payload = b""
         peer_port = self._peer_port_getter() if self._peer_port_getter else None
         if peer_port and num_want != 0:
-            fallback_host = "127.0.0.1" if client_ip == "127.0.0.1" else None
-            peer_ipv4 = resolve_peer_ipv4(fallback_host, self._public_ipv4)
-            if peer_ipv4:
-                peers_payload = socket.inet_aton(peer_ipv4) + struct.pack("!H", peer_port)
+            peers_payload = self._compact_peers_for_client(client_ip, peer_port)
 
         header = struct.pack("!IIIII", ACTION_ANNOUNCE, tx_id, 60, 0, 1)
         self._transport.sendto(header + peers_payload, addr)
@@ -141,6 +146,18 @@ class _UDPTrackerProtocol(asyncio.DatagramProtocol):
 
         resp = struct.pack("!II", ACTION_SCRAPE, tx_id) + (struct.pack("!III", 1, 0, 0) * count)
         self._transport.sendto(resp, addr)
+
+    def _compact_peers_for_client(self, client_ip: str, peer_port: int) -> bytes:
+        """Return compact peers in the same address family as the UDP client."""
+        if ":" in client_ip:
+            fallback = "::1" if client_ip == "::1" else None
+            peer_ip = resolve_peer_ipv6(fallback, self._public_ipv6)
+        else:
+            fallback = "127.0.0.1" if client_ip == "127.0.0.1" else None
+            peer_ip = resolve_peer_ipv4(fallback, self._public_ipv4)
+        if peer_ip is None:
+            return b""
+        return pack_compact_peer(peer_ip, peer_port)
 
     def _send_error(self, tx_id: int, message: str, addr: tuple[Any, ...]) -> None:
         if self._transport is not None:
@@ -182,6 +199,7 @@ class UDPTrackerServer:
         peer_port_getter: Callable[[], int | None] | None = None,
         peer_prober: Callable[[str, str, int], Any] | None = None,
         public_ipv4: str | None = None,
+        public_ipv6: str | None = None,
     ) -> None:
         self.store = store
         self.host = host
@@ -190,6 +208,7 @@ class UDPTrackerServer:
         self._peer_port_getter = peer_port_getter
         self._peer_prober = peer_prober
         self._public_ipv4 = public_ipv4
+        self._public_ipv6 = public_ipv6
         self._transport: asyncio.DatagramTransport | None = None
         self.bound_port: int | None = None
 
@@ -200,6 +219,7 @@ class UDPTrackerServer:
             peer_port_getter=self._peer_port_getter,
             peer_prober=self._peer_prober,
             public_ipv4=self._public_ipv4,
+            public_ipv6=self._public_ipv6,
         )
         try:
             sock = bind_listener_socket(self.host, self.configured_port, socket.SOCK_DGRAM)

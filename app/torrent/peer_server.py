@@ -7,7 +7,7 @@ import logging
 import secrets
 import socket
 
-from app.ip_utils import bind_listener_socket, normalize_ip
+from app.ip_utils import bind_listener_socket, is_probeable_ip, normalize_ip
 from app.torrent.magnet import decode_peer_id, format_host_port
 from app.torrent.store import TorrentSessionStore
 
@@ -30,6 +30,7 @@ class PeerWireServer:
         handshake_timeout: float = 5.0,
         probe_enabled: bool = True,
         probe_timeout: float = 2.0,
+        max_in_flight_probes: int = 8,
     ) -> None:
         self.store = store
         self.host = host
@@ -38,6 +39,7 @@ class PeerWireServer:
         self.handshake_timeout = handshake_timeout
         self.probe_enabled = probe_enabled
         self.probe_timeout = probe_timeout
+        self.max_in_flight_probes = max_in_flight_probes
         self._peer_id = b"-IL0100-" + secrets.token_hex(6).encode("ascii")
         self._server: asyncio.Server | None = None
         self._probe_tasks: set[asyncio.Task[None]] = set()
@@ -89,14 +91,18 @@ class PeerWireServer:
             return None
 
         norm_ip = normalize_ip(ip)
-        if norm_ip is None:
+        if norm_ip is None or not is_probeable_ip(norm_ip):
             return None
 
         if self.bound_port and port == self.bound_port and norm_ip in {"127.0.0.1", "::1"}:
             return None
 
         endpoint = format_host_port(norm_ip, port)
-        if not self.store.claim_peer_probe(info_hash, endpoint):
+        if not self.store.claim_peer_probe(
+            info_hash,
+            endpoint,
+            max_in_flight=self.max_in_flight_probes,
+        ):
             return None
 
         task = asyncio.create_task(self._run_outbound_probe(info_hash, norm_ip, port, endpoint))

@@ -373,6 +373,17 @@ body {
   color: var(--text-muted);
 }
 
+.session-expiry {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.session-expiry.expiry-soon {
+  color: var(--warn-text);
+  font-weight: 600;
+}
+
 .pulse-dot {
   width: 9px;
   height: 9px;

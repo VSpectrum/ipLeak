@@ -3,6 +3,7 @@
  */
 
 import { createTorrentSession, fetchTorrentSession } from "./api.js";
+import { formatEndpoint } from "./webrtc.js";
 
 const SOURCE_LABELS = {
   http_tracker: "HTTP Tracker",
@@ -30,6 +31,7 @@ export function createTorrentController({ getBrowserIp }) {
   const panel = document.getElementById("torrent-panel");
   const listenerDot = document.getElementById("listener-dot");
   const listenerStatus = document.getElementById("listener-status-text");
+  const expiryEl = document.getElementById("session-expiry");
   const verdictEl = document.getElementById("torrent-verdict");
   const emptyHitsEl = document.getElementById("torrent-empty-hits");
   const hitsWrapEl = document.getElementById("torrent-hits-wrap");
@@ -37,15 +39,72 @@ export function createTorrentController({ getBrowserIp }) {
 
   let activeToken = null;
   let pollTimer = null;
+  let listening = false;
+  let expiresAtMs = null;
+  let expiryTimer = null;
 
-  function stopPolling(reasonText = "Stopped listening. Click New Magnet Link to start another test.") {
+  function pausePolling() {
     if (pollTimer !== null) {
       window.clearInterval(pollTimer);
       pollTimer = null;
     }
+  }
+
+  function stopExpiryTimer() {
+    if (expiryTimer !== null) {
+      window.clearInterval(expiryTimer);
+      expiryTimer = null;
+    }
+  }
+
+  function clearExpiry() {
+    stopExpiryTimer();
+    expiresAtMs = null;
+    expiryEl.textContent = "";
+    expiryEl.classList.remove("expiry-soon");
+  }
+
+  function haltListening(reasonText) {
+    listening = false;
+    pausePolling();
     listenerDot.classList.remove("active");
-    listenerStatus.textContent = reasonText;
+    if (reasonText) listenerStatus.textContent = reasonText;
     stopBtn.classList.add("hidden");
+  }
+
+  function tickExpiry() {
+    if (expiresAtMs === null) return;
+    const remaining = Math.round((expiresAtMs - Date.now()) / 1000);
+    if (remaining <= 0) {
+      stopExpiryTimer();
+      expiresAtMs = null;
+      expiryEl.textContent = "Expired";
+      expiryEl.classList.add("expiry-soon");
+      if (listening) {
+        activeToken = null;
+        haltListening("Session expired. Generate a new magnet link to run another test.");
+      }
+      return;
+    }
+    const minutes = Math.floor(remaining / 60);
+    const seconds = remaining % 60;
+    expiryEl.textContent = `Expires in ${minutes}:${String(seconds).padStart(2, "0")}`;
+    expiryEl.classList.toggle("expiry-soon", remaining <= 60);
+  }
+
+  function noteExpiry(expiresAtSeconds) {
+    if (!expiresAtSeconds) return;
+    expiresAtMs = expiresAtSeconds * 1000;
+    tickExpiry();
+    if (expiryTimer === null && expiresAtMs !== null) {
+      expiryTimer = window.setInterval(tickExpiry, 1000);
+    }
+  }
+
+  function resumePolling() {
+    if (!listening || !activeToken || pollTimer !== null) return;
+    pollTimer = window.setInterval(pollOnce, 1500);
+    pollOnce();
   }
 
   async function pollOnce() {
@@ -53,7 +112,11 @@ export function createTorrentController({ getBrowserIp }) {
     try {
       const session = await fetchTorrentSession(activeToken);
       if (!session) {
-        stopPolling("Session expired. Generate a new magnet link to run another test.");
+        activeToken = null;
+        haltListening("Session expired. Generate a new magnet link to run another test.");
+        stopExpiryTimer();
+        expiryEl.textContent = "Expired";
+        expiryEl.classList.add("expiry-soon");
         return;
       }
       renderSession(session);
@@ -139,6 +202,7 @@ export function createTorrentController({ getBrowserIp }) {
   }
 
   function renderSession(session) {
+    noteExpiry(session.expires_at);
     renderVerdict(session);
     renderProbes(session);
     const detections = session.detections || [];
@@ -162,7 +226,7 @@ export function createTorrentController({ getBrowserIp }) {
       // 1. Observed IP + port
       const ipTd = document.createElement("td");
       ipTd.className = "mono";
-      ipTd.textContent = det.port ? `${det.ip}:${det.port}` : det.ip;
+      ipTd.textContent = formatEndpoint(det.ip, det.port);
       tr.appendChild(ipTd);
 
       // 2. Source protocol
@@ -212,13 +276,16 @@ export function createTorrentController({ getBrowserIp }) {
   }
 
   async function startNewSession() {
-    stopPolling();
+    haltListening();
+    clearExpiry();
+    activeToken = null;
     generateBtn.disabled = true;
     generateBtn.textContent = "Generating…";
 
     try {
       const session = await createTorrentSession();
       activeToken = session.token;
+      listening = true;
 
       idleBox.classList.add("hidden");
       panel.classList.remove("hidden");
@@ -232,22 +299,46 @@ export function createTorrentController({ getBrowserIp }) {
       renderSession(session);
 
       listenerDot.classList.add("active");
-      listenerStatus.textContent =
-        "Listening for HTTP tracker, UDP tracker, and TCP peer connections (polling every 1.5s)…";
+      listenerStatus.textContent = document.hidden
+        ? "Paused while this tab is hidden. The session stays active until it expires."
+        : "Listening for HTTP tracker, UDP tracker, and TCP peer connections (polling every 1.5s)…";
 
       generateBtn.textContent = "New Magnet Link";
-      pollTimer = window.setInterval(pollOnce, 1500);
+      if (!document.hidden) {
+        pollTimer = window.setInterval(pollOnce, 1500);
+      }
     } catch (err) {
-      idleBox.classList.remove("hidden");
-      idleBox.textContent = `Error creating magnet session: ${err.message}`;
-      generateBtn.textContent = "Generate Magnet Link";
+      if (panel.classList.contains("hidden")) {
+        idleBox.classList.remove("hidden");
+        idleBox.textContent = `Error creating magnet session: ${err.message}`;
+      } else {
+        listenerStatus.textContent = err.message;
+      }
+      generateBtn.textContent = activeToken ? "New Magnet Link" : "Generate Magnet Link";
     } finally {
       generateBtn.disabled = false;
     }
   }
 
+  document.addEventListener("visibilitychange", () => {
+    if (!listening) return;
+    if (document.hidden) {
+      pausePolling();
+      listenerDot.classList.remove("active");
+      listenerStatus.textContent =
+        "Paused while this tab is hidden. The session stays active until it expires.";
+      return;
+    }
+    listenerDot.classList.add("active");
+    listenerStatus.textContent =
+      "Listening for HTTP tracker, UDP tracker, and TCP peer connections (polling every 1.5s)…";
+    resumePolling();
+  });
+
   generateBtn.addEventListener("click", startNewSession);
-  stopBtn.addEventListener("click", () => stopPolling());
+  stopBtn.addEventListener("click", () =>
+    haltListening("Stopped listening. Click New Magnet Link to start another test.")
+  );
   refreshBtn.addEventListener("click", pollOnce);
 
   copyMagnetBtn.addEventListener("click", async () => {
@@ -260,6 +351,6 @@ export function createTorrentController({ getBrowserIp }) {
     }, 1400);
   });
 
-  return { startNewSession, stopPolling };
+  return { startNewSession, stopPolling: haltListening };
 }
 

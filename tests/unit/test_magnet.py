@@ -9,6 +9,7 @@ import pytest
 
 from app.torrent.bencode import bdecode, bencode
 from app.torrent.magnet import (
+    TORRENT_PAYLOAD,
     build_magnet_uri,
     build_torrent_file,
     decode_peer_id,
@@ -83,4 +84,7 @@ def test_build_torrent_file_produces_matching_sha1_info_hash() -> None:
     ]
     computed_hash = hashlib.sha1(bencode(decoded[b"info"])).hexdigest()
     assert computed_hash == info_hash
+    assert decoded[b"info"][b"length"] == len(TORRENT_PAYLOAD)
+    assert decoded[b"info"][b"pieces"] == hashlib.sha1(TORRENT_PAYLOAD).digest()
+    assert decoded[b"info"][b"pieces"] != b"\x00" * 20
 

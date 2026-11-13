@@ -201,10 +201,34 @@ class TorrentSessionStore:
         self.purge_expired()
         return self._by_info_hash.get(info_hash.strip().lower())
 
-    def claim_peer_probe(self, info_hash: str, endpoint: str) -> bool:
-        """Mark ``endpoint`` ('ip:port') as pending outbound probe if not yet probed."""
+    def recent_session_count(self, creator_ip: str, window_seconds: int) -> int:
+        """Count sessions this client IP created inside the rate-limit window."""
+        self.purge_expired()
+        normalized = normalize_ip(creator_ip) or creator_ip
+        now = self._clock()
+        return sum(
+            1
+            for session in self._by_token.values()
+            if session.creator_ip == normalized and now - session.created_at < window_seconds
+        )
+
+    def claim_peer_probe(
+        self,
+        info_hash: str,
+        endpoint: str,
+        *,
+        max_in_flight: int = 8,
+    ) -> bool:
+        """Mark ``endpoint`` ('ip:port') as a pending outbound probe.
+
+        Returns False when the endpoint was already claimed or the session already
+        has ``max_in_flight`` probes that have not finished.
+        """
         session = self.get_by_info_hash(info_hash)
         if session is None or endpoint in session.peer_probes:
+            return False
+        in_flight = sum(1 for status in session.peer_probes.values() if status == "pending")
+        if in_flight >= max_in_flight:
             return False
         session.peer_probes[endpoint] = "pending"
         return True

@@ -2,10 +2,22 @@
 
 from __future__ import annotations
 
+import socket
+
 import pytest
 
 from app.config import load_settings
-from app.ip_utils import classify_ip, normalize_ip, resolve_peer_ipv4
+from app.ip_utils import (
+    bind_listener_socket,
+    classify_ip,
+    describe_address,
+    is_probeable_ip,
+    normalize_ip,
+    pack_compact_peer,
+    resolve_peer_ipv4,
+    resolve_peer_ipv6,
+)
+from app.main import enforce_single_process
 
 
 def test_normalize_ip_handles_ipv4_ipv6_brackets_zones_and_mapped() -> None:
@@ -34,6 +46,9 @@ def test_normalize_ip_handles_ipv4_ipv6_brackets_zones_and_mapped() -> None:
         ("169.254.10.20", 4, "link_local", False),
         ("fe80::abcd%wlan0", 6, "link_local", False),
         ("203.0.113.10", 4, "reserved", False),  # RFC 5737 TEST-NET-3
+        ("0.0.0.0", 4, "reserved", False),
+        ("224.0.0.1", 4, "reserved", False),
+        ("ff02::1", 6, "reserved", False),
         ("testclient", None, "unknown", False),
     ],
 )
@@ -57,16 +72,86 @@ def test_resolve_peer_ipv4() -> None:
     assert resolve_peer_ipv4("::1") is None
 
 
+def test_resolve_peer_ipv6_and_compact_pack() -> None:
+    assert resolve_peer_ipv6("localhost") == "::1"
+    assert resolve_peer_ipv6("example.com", configured_ipv6="2001:db8::10") == "2001:db8::10"
+    assert resolve_peer_ipv6("127.0.0.1") is None
+    assert resolve_peer_ipv6("2001:db8::1") == "2001:db8::1"
+
+    assert pack_compact_peer("127.0.0.1", 6889) == socket.inet_aton("127.0.0.1") + (6889).to_bytes(
+        2, "big"
+    )
+    packed_v6 = pack_compact_peer("2001:db8::1", 6889)
+    assert len(packed_v6) == 18
+    assert packed_v6[:16] == socket.inet_pton(socket.AF_INET6, "2001:db8::1")
+
+
+def test_is_probeable_ip_allows_only_global_unicast() -> None:
+    assert is_probeable_ip("8.8.8.8") is True
+    assert is_probeable_ip("2606:4700:4700::1111") is True
+    assert is_probeable_ip("127.0.0.1") is False
+    assert is_probeable_ip("::1") is False
+    assert is_probeable_ip("10.1.2.3") is False
+    assert is_probeable_ip("100.64.0.1") is False
+    assert is_probeable_ip("169.254.169.254") is False
+    assert is_probeable_ip("fe80::1") is False
+    assert is_probeable_ip("224.0.0.1") is False
+    assert is_probeable_ip("203.0.113.10") is False
+    assert is_probeable_ip("not-an-ip") is False
+
+
+def test_describe_address_matches_server_scopes() -> None:
+    public = describe_address("8.8.8.8")
+    assert public.scope == "public" and public.is_public is True
+    assert describe_address("100.64.10.1").scope == "private"
+    assert describe_address("203.0.113.10").scope == "reserved"
+    assert describe_address("169.254.1.1").scope == "link_local"
+    mdns = describe_address("host.local")
+    assert mdns.scope == "mdns" and mdns.is_public is False
+    assert describe_address("not-an-ip").scope == "unknown"
+    assert describe_address("[2001:db8::1]").scope == "reserved"
+
+
+def test_bind_listener_socket_disables_v6only() -> None:
+    sock = bind_listener_socket("::", 0, socket.SOCK_STREAM)
+    try:
+        assert sock.getsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY) == 0
+        assert sock.getsockname()[0] == "::"
+    finally:
+        sock.close()
+
+
+def test_enforce_single_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+    monkeypatch.delenv("UVICORN_WORKERS", raising=False)
+    enforce_single_process()
+
+    monkeypatch.setenv("WEB_CONCURRENCY", "1")
+    enforce_single_process()
+
+    monkeypatch.setenv("UVICORN_WORKERS", "4")
+    with pytest.raises(RuntimeError, match="one process"):
+        enforce_single_process()
+
+
 def test_load_settings_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("IPLEAK_BIND_HOST", "127.0.0.1")
     monkeypatch.setenv("IPLEAK_PUBLIC_HOST", "leak.example.com")
     monkeypatch.setenv("IPLEAK_TRUST_PROXY_HEADERS", "true")
     monkeypatch.setenv("IPLEAK_UDP_TRACKER_PORT", "7001")
     monkeypatch.setenv("IPLEAK_PEER_SERVER_ENABLED", "false")
+    monkeypatch.setenv("IPLEAK_PUBLIC_IPV6", "2001:db8::10")
+    monkeypatch.setenv("IPLEAK_HTTP_PORT", "8080")
+    monkeypatch.setenv("IPLEAK_SESSION_CREATE_LIMIT", "3")
+    monkeypatch.setenv("IPLEAK_MAX_IN_FLIGHT_PROBES", "2")
 
     cfg = load_settings()
     assert cfg.bind_host == "127.0.0.1"
     assert cfg.public_host == "leak.example.com"
+    assert cfg.public_ipv6 == "2001:db8::10"
+    assert cfg.http_port == 8080
+    assert cfg.session_create_limit == 3
+    assert cfg.max_in_flight_probes == 2
     assert cfg.trust_proxy_headers is True
     assert cfg.udp_tracker_port == 7001
     assert cfg.peer_server_enabled is False

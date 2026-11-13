@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import secrets
-import socket
-import struct
 import urllib.parse
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
 from app.config import Settings
-from app.ip_utils import extract_client_ip, resolve_peer_ipv4
+from app.ip_utils import (
+    extract_client_ip,
+    pack_compact_peer,
+    request_socket_ip,
+    resolve_peer_ipv4,
+    resolve_peer_ipv6,
+)
 from app.torrent.bencode import bencode
 from app.torrent.magnet import decode_peer_id, format_host_port
 from app.torrent.peer_server import PeerWireServer
@@ -35,6 +39,15 @@ async def create_torrent_session(request: Request) -> JSONResponse:
         request,
         trust_proxy_headers=settings.trust_proxy_headers,
     )
+    if (
+        store.recent_session_count(creator_ip, settings.session_create_window_seconds)
+        >= settings.session_create_limit
+    ):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many torrent sessions from this address. Try again shortly.",
+            headers={"Retry-After": str(settings.session_create_window_seconds)},
+        )
 
     token = secrets.token_hex(8)
     tracker_host = _determine_tracker_host(request, settings)
@@ -46,7 +59,7 @@ async def create_torrent_session(request: Request) -> JSONResponse:
 
     peers: list[str] = []
     if peer_server and peer_server.bound_port:
-        peers.append(format_host_port(tracker_host, peer_server.bound_port))
+        peers = _magnet_peer_endpoints(tracker_host, peer_server.bound_port, settings)
 
     session = store.create_session(
         creator_ip=creator_ip,
@@ -138,22 +151,23 @@ async def http_tracker_announce(request: Request, token: str | None = None) -> R
     if session is None:
         return _bencoded_response({"failure reason": "Unknown or expired torrent session"})
 
-    if peer_server is not None and announced_port:
-        peer_server.schedule_outbound_probe(session.info_hash, client_ip, announced_port)
+    socket_ip = request_socket_ip(request)
+    if peer_server is not None and announced_port and socket_ip:
+        peer_server.schedule_outbound_probe(session.info_hash, socket_ip, announced_port)
 
     peer_port = peer_server.bound_port if peer_server else None
-    peer_ipv4 = (
-        resolve_peer_ipv4(request.url.hostname, settings.public_ipv4)
-        if peer_port and numwant != 0
-        else None
-    )
+    include_peers = bool(peer_port and numwant != 0)
+    tracker_host = _determine_tracker_host(request, settings)
+    peer_ipv4, peer_ipv6 = _advertised_peer_ips(tracker_host, settings)
 
     if compact:
-        peers_blob = (
-            socket.inet_aton(peer_ipv4) + struct.pack("!H", peer_port)
-            if (peer_ipv4 and peer_port)
-            else b""
-        )
+        peers_blob = b""
+        peers6_blob = b""
+        if include_peers and peer_port:
+            if peer_ipv4:
+                peers_blob = pack_compact_peer(peer_ipv4, peer_port)
+            if peer_ipv6:
+                peers6_blob = pack_compact_peer(peer_ipv6, peer_port)
         return _bencoded_response(
             {
                 "interval": 60,
@@ -161,15 +175,16 @@ async def http_tracker_announce(request: Request, token: str | None = None) -> R
                 "complete": 1,
                 "incomplete": 0,
                 "peers": peers_blob,
-                "peers6": b"",
+                "peers6": peers6_blob,
             }
         )
 
-    peers_list = (
-        [{"peer id": _SERVER_PEER_ID, "ip": peer_ipv4, "port": peer_port}]
-        if (peer_ipv4 and peer_port)
-        else []
-    )
+    peers_list: list[dict[str, str | int | bytes]] = []
+    if include_peers and peer_port:
+        if peer_ipv4:
+            peers_list.append({"peer id": _SERVER_PEER_ID, "ip": peer_ipv4, "port": peer_port})
+        if peer_ipv6:
+            peers_list.append({"peer id": _SERVER_PEER_ID, "ip": peer_ipv6, "port": peer_port})
     return _bencoded_response(
         {
             "interval": 60,
@@ -261,6 +276,33 @@ def _parse_optional_int(values: list[str] | None, default: int | None = None) ->
         return int(values[0])
     except ValueError:
         return default
+
+
+def _advertised_peer_ips(tracker_host: str, settings: Settings) -> tuple[str | None, str | None]:
+    """Return the IPv4 and IPv6 literals to hand back in tracker peer lists."""
+    ipv4 = resolve_peer_ipv4(tracker_host, settings.public_ipv4)
+    ipv6 = resolve_peer_ipv6(tracker_host, settings.public_ipv6)
+    if (
+        ipv6 is None
+        and not settings.public_ipv6
+        and settings.bind_host.strip() == "::"
+        and tracker_host in {"localhost", "127.0.0.1", "::1"}
+    ):
+        ipv6 = "::1"
+    return ipv4, ipv6
+
+
+def _magnet_peer_endpoints(tracker_host: str, port: int, settings: Settings) -> list[str]:
+    """Build unique ``x.pe`` values for the tracker host plus literal v4 and v6 peers."""
+    ipv4, ipv6 = _advertised_peer_ips(tracker_host, settings)
+    endpoints: list[str] = []
+    for host in (tracker_host, ipv4, ipv6):
+        if not host:
+            continue
+        formatted = format_host_port(host, port)
+        if formatted not in endpoints:
+            endpoints.append(formatted)
+    return endpoints
 
 
 def _determine_tracker_host(request: Request, settings: Settings) -> str:

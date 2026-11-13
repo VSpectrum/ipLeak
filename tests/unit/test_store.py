@@ -90,6 +90,32 @@ def test_mismatched_token_and_info_hash_is_rejected() -> None:
     assert len(s2.detections) == 0
 
 
+def test_recent_session_count_is_per_ip_and_window() -> None:
+    current_time = 1_000.0
+    store = TorrentSessionStore(ttl_seconds=900, clock=lambda: current_time)
+    store.create_session(creator_ip="1.1.1.1", trackers=[], token="a")
+    store.create_session(creator_ip="::ffff:1.1.1.1", trackers=[], token="b")
+    store.create_session(creator_ip="8.8.8.8", trackers=[], token="c")
+
+    assert store.recent_session_count("1.1.1.1", 300) == 2
+    assert store.recent_session_count("8.8.8.8", 300) == 1
+
+    current_time += 301
+    assert store.recent_session_count("1.1.1.1", 300) == 0
+
+
+def test_claim_peer_probe_caps_in_flight_probes() -> None:
+    store = TorrentSessionStore(ttl_seconds=300)
+    session = store.create_session(creator_ip="8.8.8.8", trackers=[], token="probe")
+
+    assert store.claim_peer_probe(session.info_hash, "8.8.8.8:1", max_in_flight=1) is True
+    assert store.claim_peer_probe(session.info_hash, "8.8.8.8:1", max_in_flight=1) is False
+    assert store.claim_peer_probe(session.info_hash, "8.8.8.8:2", max_in_flight=1) is False
+
+    store.update_peer_probe(session.info_hash, "8.8.8.8:1", "closed")
+    assert store.claim_peer_probe(session.info_hash, "8.8.8.8:2", max_in_flight=1) is True
+
+
 def test_ttl_expiration_and_max_sessions_eviction() -> None:
     current_time = 1000.0
     store = TorrentSessionStore(

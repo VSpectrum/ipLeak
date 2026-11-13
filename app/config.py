@@ -40,9 +40,11 @@ class Settings:
     """Runtime configuration for HTTP, UDP tracker, and TCP BitTorrent peer listeners."""
 
     bind_host: str = "::"
+    http_port: int = 8000
     public_host: str | None = None
     public_http_base_url: str | None = None
     public_ipv4: str | None = None
+    public_ipv6: str | None = None
 
     udp_tracker_enabled: bool = True
     udp_tracker_port: int = 6969
@@ -52,29 +54,37 @@ class Settings:
 
     peer_probe_enabled: bool = True
     peer_probe_timeout: float = 2.0
+    max_in_flight_probes: int = 8
 
     strict_ports: bool = False
     trust_proxy_headers: bool = False
 
     session_ttl_seconds: int = 900
     max_sessions: int = 1000
+    session_create_limit: int = 10
+    session_create_window_seconds: int = 300
 
 
 def load_settings() -> Settings:
     """Create a Settings instance from IPLEAK_* environment variables."""
     return Settings(
         bind_host=os.getenv("IPLEAK_BIND_HOST", "::").strip(),
+        http_port=_env_int("IPLEAK_HTTP_PORT", 8000),
         public_host=_env_str("IPLEAK_PUBLIC_HOST"),
         public_http_base_url=_env_str("IPLEAK_PUBLIC_HTTP_BASE_URL"),
         public_ipv4=_env_str("IPLEAK_PUBLIC_IPV4"),
+        public_ipv6=_env_str("IPLEAK_PUBLIC_IPV6"),
         udp_tracker_enabled=_env_bool("IPLEAK_UDP_TRACKER_ENABLED", True),
         udp_tracker_port=_env_int("IPLEAK_UDP_TRACKER_PORT", 6969),
         peer_server_enabled=_env_bool("IPLEAK_PEER_SERVER_ENABLED", True),
         peer_server_port=_env_int("IPLEAK_PEER_SERVER_PORT", 6889),
         peer_probe_enabled=_env_bool("IPLEAK_PEER_PROBE_ENABLED", True),
         peer_probe_timeout=_env_float("IPLEAK_PEER_PROBE_TIMEOUT", 2.0),
+        max_in_flight_probes=_env_int("IPLEAK_MAX_IN_FLIGHT_PROBES", 8),
         strict_ports=_env_bool("IPLEAK_STRICT_PORTS", False),
         trust_proxy_headers=_env_bool("IPLEAK_TRUST_PROXY_HEADERS", False),
         session_ttl_seconds=_env_int("IPLEAK_SESSION_TTL_SECONDS", 900),
         max_sessions=_env_int("IPLEAK_MAX_SESSIONS", 1000),
+        session_create_limit=_env_int("IPLEAK_SESSION_CREATE_LIMIT", 10),
+        session_create_window_seconds=_env_int("IPLEAK_SESSION_CREATE_WINDOW_SECONDS", 300),
     )

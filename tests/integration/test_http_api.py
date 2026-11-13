@@ -16,6 +16,8 @@ def test_serves_frontend_and_js_modules(client: TestClient) -> None:
     assert index_resp.status_code == 200
     assert "IP Leak Check" in index_resp.text
     assert "/static/js/app.js" in index_resp.text
+    assert "Related" in index_resp.text
+    assert 'id="session-expiry"' in index_resp.text
 
     for asset in (
         "/static/styles.css",
@@ -68,6 +70,55 @@ def test_get_client_ip_honors_proxy_headers_when_enabled() -> None:
         resp_real_ip = proxy_client.get("/api/ip", headers={"X-Real-IP": "8.8.4.4"})
         assert resp_real_ip.json()["ip"] == "8.8.4.4"
         assert resp_real_ip.json()["detected_via"] == "x-real-ip"
+
+
+def test_classify_addresses_uses_server_scopes(client: TestClient) -> None:
+    resp = client.post(
+        "/api/ip/classify",
+        json={
+            "addresses": [
+                "8.8.8.8",
+                "100.64.10.1",
+                "203.0.113.10",
+                "host.local",
+                "not-an-ip",
+                "169.254.1.1",
+            ]
+        },
+    )
+    assert resp.status_code == 200
+    by_input = {row["input"]: row for row in resp.json()["results"]}
+    assert by_input["8.8.8.8"]["scope"] == "public"
+    assert by_input["8.8.8.8"]["is_public"] is True
+    assert by_input["100.64.10.1"]["scope"] == "private"
+    assert by_input["100.64.10.1"]["is_public"] is False
+    assert by_input["203.0.113.10"]["scope"] == "reserved"
+    assert by_input["host.local"]["scope"] == "mdns"
+    assert by_input["not-an-ip"]["scope"] == "unknown"
+    assert by_input["169.254.1.1"]["scope"] == "link_local"
+
+    too_many = client.post("/api/ip/classify", json={"addresses": ["1.1.1.1"] * 65})
+    assert too_many.status_code == 422
+    too_long = client.post("/api/ip/classify", json={"addresses": ["x" * 129]})
+    assert too_long.status_code == 422
+
+
+def test_session_creation_is_rate_limited_per_ip() -> None:
+    settings = Settings(
+        bind_host="127.0.0.1",
+        udp_tracker_enabled=False,
+        peer_server_enabled=False,
+        session_create_limit=2,
+        session_create_window_seconds=300,
+    )
+    app = create_app(settings=settings)
+    with TestClient(app, client=("198.51.100.8", 1234)) as limited:
+        assert limited.post("/api/torrent/sessions").status_code == 201
+        assert limited.post("/api/torrent/sessions").status_code == 201
+        blocked = limited.post("/api/torrent/sessions")
+        assert blocked.status_code == 429
+        assert "Too many" in blocked.json()["detail"]
+        assert blocked.headers["retry-after"] == "300"
 
 
 def test_create_and_fetch_torrent_session(client: TestClient) -> None:
